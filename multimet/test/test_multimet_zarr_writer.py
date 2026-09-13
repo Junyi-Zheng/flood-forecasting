@@ -117,3 +117,120 @@ def test_schema_validation_failure(writer: MultiMetZarrWriter):
   )
   with pytest.raises(ValueError):
     writer.write_or_append(ds_bad, Product.CPC)
+
+
+def test_append_dates_nowcast(writer: MultiMetZarrWriter):
+  basins = ["basin_1", "basin_2"]
+  dates_initial = pd.date_range("2020-01-01", periods=5, freq="D")
+  ds_init = xr.Dataset(
+      data_vars={
+          "cpc_precipitation": (["basin", "date"], np.ones((2, 5), dtype=np.float32)),
+      },
+      coords={"basin": basins, "date": dates_initial.values},
+  )
+  store_path = writer.write_or_append(ds_init, Product.CPC)
+
+  # Append 3 new dates
+  dates_new = pd.date_range("2020-01-06", periods=3, freq="D")
+  start_idx, end_idx = writer.append_dates(Product.CPC, dates_new)
+  assert start_idx == 5
+  assert end_idx == 8
+
+  ds_extended = xr.open_zarr(store_path)
+  assert len(ds_extended["date"]) == 8
+  assert ds_extended["cpc_precipitation"].shape == (2, 8)
+  # Verify original values preserved
+  assert np.all(ds_extended["cpc_precipitation"].values[:, :5] == 1.0)
+  # Verify new slots are NaN before write
+  assert np.all(np.isnan(ds_extended["cpc_precipitation"].values[:, 5:]))
+
+  # Verify direct chunk write into new slots works
+  writer.write_direct_chunk(Product.CPC, "cpc_precipitation", 5, np.array([42.0, 43.0], dtype=np.float32))
+  writer.consolidate_metadata(Product.CPC)
+
+  ds_written = xr.open_zarr(store_path)
+  assert np.all(ds_written["cpc_precipitation"].values[:, 5] == [42.0, 43.0])
+
+
+def test_append_basins_nowcast(writer: MultiMetZarrWriter):
+  basins_initial = ["basin_A", "basin_B"]
+  dates = pd.date_range("2020-01-01", periods=5, freq="D")
+  ds_init = xr.Dataset(
+      data_vars={
+          "cpc_precipitation": (["basin", "date"], np.ones((2, 5), dtype=np.float32)),
+      },
+      coords={"basin": basins_initial, "date": dates.values},
+  )
+  store_path = writer.write_or_append(ds_init, Product.CPC)
+
+  # Append new basin_C and basin_D over the SAME dates
+  basins_new = ["basin_C", "basin_D"]
+  ds_new = xr.Dataset(
+      data_vars={
+          "cpc_precipitation": (["basin", "date"], np.full((2, 5), 88.0, dtype=np.float32)),
+      },
+      coords={"basin": basins_new, "date": dates.values},
+  )
+  writer.append_basins(Product.CPC, ds_new)
+
+  ds_result = xr.open_zarr(store_path)
+  assert list(ds_result["basin"].values) == ["basin_A", "basin_B", "basin_C", "basin_D"]
+  assert ds_result["cpc_precipitation"].shape == (4, 5)
+  assert np.all(ds_result["cpc_precipitation"].sel(basin="basin_C").values == 88.0)
+
+
+def test_reject_simultaneous_2d_expansion(writer: MultiMetZarrWriter):
+  basins_initial = ["basin_1", "basin_2"]
+  dates_initial = pd.date_range("2020-01-01", periods=5, freq="D")
+  ds_init = xr.Dataset(
+      data_vars={
+          "cpc_precipitation": (["basin", "date"], np.ones((2, 5), dtype=np.float32)),
+      },
+      coords={"basin": basins_initial, "date": dates_initial.values},
+  )
+  writer.write_or_append(ds_init, Product.CPC)
+
+  # Attempt to append BOTH new basins AND new dates
+  basins_new = ["basin_3"]
+  dates_new = pd.date_range("2020-01-06", periods=3, freq="D")
+  ds_both = xr.Dataset(
+      data_vars={
+          "cpc_precipitation": (["basin", "date"], np.ones((1, 3), dtype=np.float32)),
+      },
+      coords={"basin": basins_new, "date": dates_new.values},
+  )
+
+  with pytest.raises(ValueError, match="Cannot add both new basins and new dates"):
+    writer.write_or_append(ds_both, Product.CPC)
+
+
+def test_reject_prepending_historical_dates(writer: MultiMetZarrWriter):
+  basins = ["basin_1"]
+  dates = pd.date_range("2020-01-10", periods=5, freq="D")
+  ds = xr.Dataset(
+      data_vars={"cpc_precipitation": (["basin", "date"], np.ones((1, 5), dtype=np.float32))},
+      coords={"basin": basins, "date": dates.values},
+  )
+  writer.write_or_append(ds, Product.CPC)
+
+  earlier_dates = pd.date_range("2020-01-01", periods=3, freq="D")
+  with pytest.raises(ValueError, match="Cannot prepend or insert historical dates"):
+    writer.append_dates(Product.CPC, earlier_dates)
+
+
+def test_reject_mismatched_dates_on_append_basins(writer: MultiMetZarrWriter):
+  basins = ["basin_1"]
+  dates = pd.date_range("2020-01-01", periods=5, freq="D")
+  ds = xr.Dataset(
+      data_vars={"cpc_precipitation": (["basin", "date"], np.ones((1, 5), dtype=np.float32))},
+      coords={"basin": basins, "date": dates.values},
+  )
+  writer.write_or_append(ds, Product.CPC)
+
+  ds_mismatched_dates = xr.Dataset(
+      data_vars={"cpc_precipitation": (["basin", "date"], np.ones((1, 4), dtype=np.float32))},
+      coords={"basin": ["basin_2"], "date": pd.date_range("2020-01-01", periods=4).values},
+  )
+  with pytest.raises(ValueError, match="dates mismatch"):
+    writer.append_basins(Product.CPC, ds_mismatched_dates)
+

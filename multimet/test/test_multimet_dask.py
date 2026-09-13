@@ -286,4 +286,142 @@ def test_gcp_project_autodetection_and_configuration(monkeypatch):
   assert fsspec.config.conf.get("gcs", {}).get("project") == "configured-proj-789"
 
 
+def test_dask_append_dates_nowcast(dask_client):
+  """Verifies that Dask can extend an existing store with new dates when append=True."""
+  if not _TEST_BASINS_PATH.exists():
+    pytest.skip(f"Test basins GeoJSON not found at {_TEST_BASINS_PATH}")
+
+  with tempfile.TemporaryDirectory() as tmp_dir:
+    # 1. Initial extraction of 2 days
+    extract_product_dask(
+        product="CPC",
+        basins=_TEST_BASINS_PATH,
+        output_dir=tmp_dir,
+        start_date="2020-01-01",
+        end_date="2020-01-02",
+        client=dask_client,
+        source="public",
+        use_bounding_box=True,
+    )
+
+    store_path = MultiMetZarrWriter(tmp_dir).get_store_path(Product.CPC)
+    ds1 = xr.open_zarr(store_path)
+    assert ds1["cpc_precipitation"].shape == (5, 2)
+    val1 = ds1["cpc_precipitation"].values.copy()
+
+    # 2. Append day 3 with append=True
+    extract_product_dask(
+        product="CPC",
+        basins=_TEST_BASINS_PATH,
+        output_dir=tmp_dir,
+        start_date="2020-01-01",
+        end_date="2020-01-03",
+        client=dask_client,
+        source="public",
+        use_bounding_box=True,
+        append=True,
+    )
+
+    ds2 = xr.open_zarr(store_path)
+    assert ds2["cpc_precipitation"].shape == (5, 3)
+    # Verify original 2 days are preserved
+    np.testing.assert_array_equal(ds2["cpc_precipitation"].values[:, :2], val1)
+    # Verify day 3 is populated with real non-NaN data
+    assert np.all(~np.isnan(ds2["cpc_precipitation"].values[:, 2]))
+
+
+def test_dask_append_basins_nowcast(dask_client, tmp_path):
+  """Verifies that Dask can append new basins across existing store dates when append=True."""
+  if not _TEST_BASINS_PATH.exists():
+    pytest.skip(f"Test basins GeoJSON not found at {_TEST_BASINS_PATH}")
+
+  full_gdf = gpd.read_file(str(_TEST_BASINS_PATH))
+  p_initial = tmp_path / "basins_init.geojson"
+  p_new = tmp_path / "basins_new.geojson"
+
+  full_gdf.iloc[:2].to_file(str(p_initial), driver="GeoJSON")
+  full_gdf.iloc[2:].to_file(str(p_new), driver="GeoJSON")
+
+  out_dir = str(tmp_path / "zarr_out")
+
+  # 1. Initial extraction of first 2 basins for 2 days
+  extract_product_dask(
+      product="CPC",
+      basins=p_initial,
+      output_dir=out_dir,
+      start_date="2020-01-01",
+      end_date="2020-01-02",
+      client=dask_client,
+      source="public",
+      use_bounding_box=True,
+  )
+
+  store_path = MultiMetZarrWriter(out_dir).get_store_path(Product.CPC)
+  ds1 = xr.open_zarr(store_path)
+  assert ds1["cpc_precipitation"].shape == (2, 2)
+  init_basins = list(ds1["basin"].values)
+
+  # 2. Append the remaining 3 basins with append=True
+  extract_product_dask(
+      product="CPC",
+      basins=p_new,
+      output_dir=out_dir,
+      start_date="2020-01-01",
+      end_date="2020-01-02",
+      client=dask_client,
+      source="public",
+      use_bounding_box=True,
+      append=True,
+  )
+
+  ds2 = xr.open_zarr(store_path)
+  assert ds2["cpc_precipitation"].shape == (5, 2)
+  all_basins = list(ds2["basin"].values)
+  assert all_basins[:2] == init_basins
+  assert len(all_basins) == 5
+  assert np.all(~np.isnan(ds2["cpc_precipitation"].values))
+
+
+def test_dask_reject_simultaneous_2d_expansion(dask_client, tmp_path):
+  """Verifies that Dask raises ValueError if user attempts to append both basins and dates at once."""
+  if not _TEST_BASINS_PATH.exists():
+    pytest.skip(f"Test basins GeoJSON not found at {_TEST_BASINS_PATH}")
+
+  full_gdf = gpd.read_file(str(_TEST_BASINS_PATH))
+  p_initial = tmp_path / "basins_init.geojson"
+  p_new = tmp_path / "basins_new.geojson"
+
+  full_gdf.iloc[:2].to_file(str(p_initial), driver="GeoJSON")
+  full_gdf.iloc[2:].to_file(str(p_new), driver="GeoJSON")
+
+  out_dir = str(tmp_path / "zarr_out")
+
+  # 1. Initial extraction: 2 basins, 2 days
+  extract_product_dask(
+      product="CPC",
+      basins=p_initial,
+      output_dir=out_dir,
+      start_date="2020-01-01",
+      end_date="2020-01-02",
+      client=dask_client,
+      source="public",
+      use_bounding_box=True,
+  )
+
+  # 2. Attempt to add both new basins AND new dates
+  with pytest.raises(ValueError, match="Cannot append both new basins .* and new dates"):
+    extract_product_dask(
+        product="CPC",
+        basins=p_new,
+        output_dir=out_dir,
+        start_date="2020-01-01",
+        end_date="2020-01-04",
+        client=dask_client,
+        source="public",
+        use_bounding_box=True,
+        append=True,
+    )
+
+
+
 

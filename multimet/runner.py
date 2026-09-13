@@ -243,6 +243,11 @@ def _build_parser() -> argparse.ArgumentParser:
       help="Overwrite existing basins in output Zarr store.",
   )
   parser.add_argument(
+      "--append",
+      action="store_true",
+      help="Append to existing Zarr store (either new dates or new basins).",
+  )
+  parser.add_argument(
       "--weights_cache",
       type=str,
       default=None,

@@ -108,6 +108,71 @@ class MultiMetZarrWriter:
     """Returns absolute path to the product's timeseries.zarr directory."""
     return os.path.join(self.output_dir, product.value, "timeseries.zarr")
 
+  def store_exists(self, product: Product) -> bool:
+    """Checks whether the product's Zarr store exists."""
+    store_path = self.get_store_path(product)
+    try:
+      import fsspec
+      fs, fs_path = fsspec.core.url_to_fs(store_path)
+      return (
+          fs.exists(f"{fs_path}/zarr.json")
+          or fs.exists(f"{fs_path}/.zgroup")
+          or fs.exists(f"{fs_path}/.zmetadata")
+          or (fs.exists(fs_path) and fs.isdir(fs_path))
+      )
+    except Exception:
+      return os.path.exists(os.path.join(store_path, ".zmetadata")) or os.path.exists(
+          os.path.join(store_path, ".zgroup")
+      )
+
+  def get_store_info(self, product: Product) -> Optional[Dict[str, Any]]:
+    """Inspects an existing Zarr store and returns its metadata structure.
+
+    Args:
+      product: MultiMet Product enum.
+
+    Returns:
+      Dict with 'store_path', 'basins', 'dates', 'bands', 'is_forecast',
+      'lead_time', and 'shape', or None if store does not exist.
+    """
+    if not self.store_exists(product):
+      return None
+
+    store_path = self.get_store_path(product)
+    try:
+      with xr.open_zarr(store_path) as ds:
+        if "basin" not in ds.coords or "date" not in ds.coords:
+          return None
+
+        basins = [str(b).rstrip("\x00") for b in ds["basin"].values]
+        basin_dtype = ds["basin"].dtype
+        dates = pd.DatetimeIndex(ds["date"].values)
+
+        prod_type = PRODUCT_TYPES[product]
+        is_forecast = prod_type == ProductType.FORECAST
+        lead_time = (
+            list(ds["lead_time"].values)
+            if is_forecast and "lead_time" in ds.coords
+            else None
+        )
+
+        bands = [band for band in PRODUCT_BANDS[product] if band in ds.data_vars]
+        shape = ds[bands[0]].shape if bands else None
+
+        return {
+            "store_path": store_path,
+            "basins": basins,
+            "basin_dtype": basin_dtype,
+            "dates": dates,
+            "bands": bands,
+            "is_forecast": is_forecast,
+            "lead_time": lead_time,
+            "shape": shape,
+        }
+    except Exception as e:
+      logger.warning("Failed to inspect Zarr store at %s: %s", store_path, e)
+      return None
+
   def validate_dataset_schema(self, ds: xr.Dataset, product: Product) -> None:
     """Validates that an xarray Dataset strictly complies with MultiMet schema.
 
@@ -392,6 +457,180 @@ class MultiMetZarrWriter:
 
     return bool(np.any(~np.isnan(slice_data)))
 
+  def append_dates(
+      self,
+      product: Product,
+      new_dates: Sequence[Union[pd.Timestamp, str, np.datetime64]],
+  ) -> Tuple[int, int]:
+    """Appends new dates to an existing Zarr store by resizing the array.
+
+    Resizes the 'date' coordinate and all data variables in-place, initializing
+    the newly allocated slots with NaN. Consolidates metadata post-resize.
+
+    Args:
+      product: MultiMet Product enum.
+      new_dates: Sequence of timestamps or date strings to append.
+
+    Returns:
+      Tuple of (start_idx, end_idx) indicating the integer slice range of the
+      appended dates.
+
+    Raises:
+      FileNotFoundError: If the store does not exist.
+      ValueError: If new dates are before or overlapping non-contiguously with
+        existing dates.
+    """
+    store_path = self.get_store_path(product)
+    info = self.get_store_info(product)
+    if info is None:
+      raise FileNotFoundError(
+          f"Cannot append dates: store does not exist at {store_path}"
+      )
+
+    existing_dates = info["dates"]
+    existing_dates_set = set(existing_dates)
+
+    parsed_dates = [pd.to_datetime(d) for d in new_dates]
+    dates_to_add = [d for d in parsed_dates if d not in existing_dates_set]
+
+    if not dates_to_add:
+      logger.info("All requested dates already exist in store %s", store_path)
+      return (len(existing_dates), len(existing_dates))
+
+    # Verify chronological ordering
+    if len(existing_dates) > 0:
+      max_existing = existing_dates.max()
+      min_new = min(dates_to_add)
+      if min_new <= max_existing:
+        raise ValueError(
+            f"Cannot prepend or insert historical dates into store at {store_path}. "
+            f"Min new date ({min_new.strftime('%Y-%m-%d')}) must be strictly after "
+            f"existing store end date ({max_existing.strftime('%Y-%m-%d')})."
+        )
+
+    # Sort dates chronologically
+    dates_to_add = sorted(dates_to_add)
+
+    old_len = len(existing_dates)
+    new_len = old_len + len(dates_to_add)
+
+    prod_type = PRODUCT_TYPES[product]
+    is_forecast = prod_type == ProductType.FORECAST
+    num_basins = len(info["basins"])
+
+    nan_vars = {}
+    dims = ["basin", "date"]
+    shape = (num_basins, len(dates_to_add))
+    chunk_spec = {"basin": num_basins, "date": 1}
+    basin_dt = info.get("basin_dtype", "<U22")
+    coords = {
+        "basin": np.array(info["basins"], dtype=basin_dt),
+        "date": [d.to_datetime64() for d in dates_to_add],
+    }
+
+    if is_forecast:
+      lead_steps = FORECAST_LEAD_DAYS[product]
+      coords["lead_time"] = xr.DataArray(
+          np.arange(1, lead_steps + 1, dtype=np.int64),
+          dims=["lead_time"],
+          attrs={"units": "days", "dtype": "timedelta64[ns]"},
+      )
+      dims.append("lead_time")
+      shape = (num_basins, len(dates_to_add), lead_steps)
+      chunk_spec["lead_time"] = lead_steps
+
+    for band in PRODUCT_BANDS[product]:
+      nan_vars[band] = (dims, np.full(shape, np.nan, dtype=np.float32))
+
+    nan_ds = xr.Dataset(data_vars=nan_vars, coords=coords).chunk(chunk_spec)
+    _safe_to_zarr(nan_ds, store_path, append_dim="date", consolidated=True)
+
+    logger.info(
+        "Successfully expanded %s store dates from %d to %d days (+%d days)",
+        product.value,
+        old_len,
+        new_len,
+        len(dates_to_add),
+    )
+    return (old_len, new_len)
+
+  def append_basins(
+      self,
+      product: Product,
+      new_ds: xr.Dataset,
+  ) -> str:
+    """Appends new basins to an existing Zarr store across existing dates.
+
+    Args:
+      product: MultiMet Product enum.
+      new_ds: xarray Dataset containing new basins matching MultiMet schema.
+
+    Returns:
+      Store path written to.
+
+    Raises:
+      FileNotFoundError: If target store does not exist.
+      ValueError: If dates do not match existing store dates, or if schema mismatches.
+    """
+    store_path = self.get_store_path(product)
+    info = self.get_store_info(product)
+    if info is None:
+      raise FileNotFoundError(
+          f"Cannot append basins: store does not exist at {store_path}"
+      )
+
+    # Validate schema
+    ds_to_write = new_ds.copy()
+    for var in ds_to_write.data_vars:
+      if ds_to_write[var].dtype != np.float32:
+        ds_to_write[var] = ds_to_write[var].astype(np.float32)
+
+    self.validate_dataset_schema(ds_to_write, product)
+
+    existing_dates = info["dates"]
+    incoming_dates = pd.to_datetime(ds_to_write["date"].values)
+
+    if len(existing_dates) != len(incoming_dates) or not np.array_equal(
+        existing_dates.values, incoming_dates.values
+    ):
+      raise ValueError(
+          f"Cannot append basins to {store_path}: dates mismatch. "
+          f"Store has {len(existing_dates)} dates "
+          f"[{existing_dates[0].strftime('%Y-%m-%d')}..{existing_dates[-1].strftime('%Y-%m-%d')}], "
+          f"but incoming dataset has {len(incoming_dates)} dates "
+          f"[{incoming_dates[0].strftime('%Y-%m-%d')}..{incoming_dates[-1].strftime('%Y-%m-%d')}]. "
+          "New basins must be extracted across the exact existing store date range."
+      )
+
+    existing_basins_set = set(info["basins"])
+    incoming_basins = [str(b) for b in ds_to_write["basin"].values]
+    new_basins = [b for b in incoming_basins if b not in existing_basins_set]
+
+    if not new_basins:
+      logger.info("All incoming basins already exist in store %s", store_path)
+      return store_path
+
+    new_slice = ds_to_write.sel(basin=new_basins)
+    prod_type = PRODUCT_TYPES[product]
+    chunk_spec = (
+        DEFAULT_CHUNKS_NOWCAST
+        if prod_type == ProductType.NOWCAST
+        else DEFAULT_CHUNKS_FORECAST
+    )
+    new_slice = new_slice.chunk(chunk_spec)
+
+    _safe_to_zarr(
+        new_slice, store_path, append_dim="basin", consolidated=True
+    )
+    self.consolidate_metadata(product)
+    logger.info(
+        "Successfully appended %d new basins to %s store (total: %d basins)",
+        len(new_basins),
+        product.value,
+        len(existing_basins_set) + len(new_basins),
+    )
+    return store_path
+
   def write_or_append(
       self,
       ds: xr.Dataset,
@@ -399,6 +638,9 @@ class MultiMetZarrWriter:
       overwrite_existing_basins: bool = False,
   ) -> str:
     """Writes or appends a dataset into the product's Zarr store.
+
+    Disallows adding both new basins and new dates simultaneously, as Zarr
+    requires a dense rectangular grid.
 
     Args:
       ds: xarray Dataset matching MultiMet schema.
@@ -408,6 +650,9 @@ class MultiMetZarrWriter:
 
     Returns:
       Store path written to.
+
+    Raises:
+      ValueError: If both new basins and new dates are provided simultaneously.
     """
     # Ensure float32 and ensure chunks
     ds_to_write = ds.copy()
@@ -442,23 +687,35 @@ class MultiMetZarrWriter:
       ds_chunked = ds_to_write.chunk(chunk_spec)
       _safe_to_zarr(ds_chunked, local_target, mode="w", consolidated=True)
     else:
-      # Append along basin dimension
+      # Existing store
       existing_ds = xr.open_zarr(local_target)
-      existing_basins = set(existing_ds["basin"].values)
+      existing_basins = set(str(b) for b in existing_ds["basin"].values)
 
       if not existing_basins:
         shutil.rmtree(local_target, ignore_errors=True)
         ds_chunked = ds_to_write.chunk(chunk_spec)
         _safe_to_zarr(ds_chunked, local_target, mode="w", consolidated=True)
       else:
-        incoming_basins = list(ds_to_write["basin"].values)
+        incoming_basins = [str(b) for b in ds_to_write["basin"].values]
         incoming_basins_set = set(incoming_basins)
-        existing_basins_list = list(existing_ds["basin"].values)
+        existing_basins_list = [str(b) for b in existing_ds["basin"].values]
         existing_basins_set = set(existing_basins_list)
 
         existing_dates_set = set(pd.to_datetime(existing_ds["date"].values))
         incoming_dates = [pd.to_datetime(d) for d in ds_to_write["date"].values]
         incoming_dates_set = set(incoming_dates)
+
+        has_new_basins = bool(incoming_basins_set - existing_basins_set)
+        has_new_dates = bool(incoming_dates_set - existing_dates_set)
+
+        # STRICT CHECK: Disallow adding both new basins and new dates simultaneously
+        if has_new_basins and has_new_dates:
+          raise ValueError(
+              "Cannot add both new basins and new dates to an existing Zarr store simultaneously. "
+              "A Zarr store requires a dense coordinate grid; adding coordinates along two dimensions "
+              "at once leaves unpopulated cross-quadrants (old basins for new dates, and new basins for old dates). "
+              "Please either append dates for existing basins, or append new basins across existing dates."
+          )
 
         # Case 1: Same basins, appending along date dimension
         if (
@@ -489,17 +746,6 @@ class MultiMetZarrWriter:
           _safe_to_zarr(combined, local_target, mode="w", consolidated=True)
         else:
           # Case 2: Append new basins along basin dimension
-          new_basins = [
-              b for b in incoming_basins if b not in existing_basins_set
-          ]
-          if not new_basins:
-            return store_path
-          new_slice = ds_to_write.sel(basin=new_basins)
-          new_slice = new_slice.chunk(chunk_spec)
-          _safe_to_zarr(
-              new_slice, local_target, append_dim="basin", consolidated=True
-          )
-
-
+          return self.append_basins(product, ds_to_write)
 
     return store_path

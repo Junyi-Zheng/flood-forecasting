@@ -263,6 +263,7 @@ def extract_product_dask(
     id_column: Optional[str] = None,
     overwrite: bool = False,
     resume: bool = True,
+    append: bool = False,
     weights_cache: Optional[str] = None,
     use_bounding_box: bool = True,
     earthdata_username: Optional[str] = None,
@@ -289,6 +290,8 @@ def extract_product_dask(
     id_column: Optional basin identifier column name in geometry source.
     overwrite: If True, deletes existing destination store before extraction.
     resume: If True and store exists, inspects chunks and only extracts missing days.
+    append: If True and store exists, appends either new dates or new basins.
+      Cannot append both simultaneously.
     weights_cache: Optional path to cached weights .npz file.
     use_bounding_box: Whether to geographically slice grids to basin bounds.
     earthdata_username: Optional NASA Earthdata username.
@@ -394,35 +397,145 @@ def extract_product_dask(
     writer.initialize_zarr_store(prod_enum, basin_ids, all_dates)
     missing_indices = list(range(total_days))
   else:
-    # Store exists: check date coordinates
-    try:
-      with xr.open_zarr(store_path) as existing_ds:
-        existing_dates = pd.to_datetime(existing_ds["date"].values)
-    except Exception:
-      existing_dates = None
+    store_info = writer.get_store_info(prod_enum)
+    if append and store_info is not None:
+      store_basins = set(store_info["basins"])
+      store_dates = pd.DatetimeIndex(store_info["dates"])
+      new_basins = [b for b in basin_ids if b not in store_basins]
+      new_dates = [d for d in all_dates if d not in set(store_dates)]
 
-    if existing_dates is not None and not all_dates.equals(existing_dates) and not resume:
-      logger.info("Dates mismatch: reinitializing store %s for requested date range...", store_path)
-      _remove_store(store_path)
-      writer.initialize_zarr_store(prod_enum, basin_ids, all_dates)
-      existing_z = zarr.open_group(store_path, mode="r")
-      missing_indices = list(range(total_days))
-    else:
-      existing_z = zarr.open_group(store_path, mode="r")
-      if resume:
-        missing_indices = [
-            i
-            for i in range(total_days)
-            if not writer.is_date_chunk_written(prod_enum, i, root_group=existing_z)
-        ]
-        logger.info(
-            "Resume mode: %d of %d days already written in %s",
-            total_days - len(missing_indices),
-            total_days,
-            prod_name,
+      # STRICT CHECK: Disallow simultaneous expansion along both dimensions
+      if new_basins and new_dates:
+        raise ValueError(
+            f"Cannot append both new basins ({len(new_basins)}) and new dates ({len(new_dates)}) "
+            f"simultaneously to existing Zarr store at {store_path}. "
+            "Zarr arrays require a dense rectangular coordinate grid; expanding two dimensions at once "
+            "leaves unpopulated cross-quadrants. Please run two sequential steps: "
+            "first append dates for existing basins, then append new basins for the full date range (or vice versa)."
         )
+
+      if new_basins:
+        # Appending new basins across existing store date range
+        logger.info(
+            "Append mode: staging parallel extraction of %d new basins for %s across %d existing dates [%s..%s]...",
+            len(new_basins),
+            prod_name,
+            len(store_dates),
+            store_dates[0].strftime("%Y-%m-%d"),
+            store_dates[-1].strftime("%Y-%m-%d"),
+        )
+        tmp_output_dir = os.path.join(
+            output_dir, f".tmp_append_{prod_enum.value}_{int(time.time() * 1000)}"
+        )
+        try:
+          extract_product_dask(
+              product=prod_enum,
+              basins=basins_gdf.loc[new_basins],
+              output_dir=tmp_output_dir,
+              start_date=store_dates[0],
+              end_date=store_dates[-1],
+              client=client,
+              num_workers=num_workers,
+              dask_scheduler=dask_scheduler,
+              batch_days=batch_days,
+              memory_limit=memory_limit,
+              source=source,
+              id_column=id_column,
+              overwrite=True,
+              resume=False,
+              weights_cache=weights_cache,
+              use_bounding_box=use_bounding_box,
+              earthdata_username=earthdata_username,
+              earthdata_password=earthdata_password,
+              earthdata_token=earthdata_token,
+              netrc_path=netrc_path,
+              gcp_project=gcp_project,
+              show_progress=show_progress,
+              append=False,
+              **extractor_extra_kwargs,
+          )
+          tmp_writer = MultiMetZarrWriter(tmp_output_dir)
+          tmp_store = tmp_writer.get_store_path(prod_enum)
+          with xr.open_zarr(tmp_store) as tmp_ds:
+            writer.append_basins(prod_enum, tmp_ds)
+          logger.info(
+              "Successfully appended %d new basins to %s store at %s",
+              len(new_basins),
+              prod_name,
+              store_path,
+          )
+        finally:
+          try:
+            fs, fs_path = fsspec.core.url_to_fs(tmp_output_dir)
+            if fs.exists(fs_path):
+              fs.rm(fs_path, recursive=True)
+          except Exception:
+            if os.path.exists(tmp_output_dir):
+              shutil.rmtree(tmp_output_dir, ignore_errors=True)
+        return store_path
+
+      elif new_dates:
+        # Appending new dates for existing basins
+        logger.info(
+            "Append mode: expanding %s store dates by %d days [%s..%s]...",
+            prod_name,
+            len(new_dates),
+            new_dates[0].strftime("%Y-%m-%d"),
+            new_dates[-1].strftime("%Y-%m-%d"),
+        )
+        start_idx, end_idx = writer.append_dates(prod_enum, new_dates)
+        updated_info = writer.get_store_info(prod_enum)
+        all_dates = updated_info["dates"]
+        total_days = len(all_dates)
+        existing_z = zarr.open_group(store_path, mode="r")
+        if resume:
+          missing_indices = [
+              i
+              for i in range(total_days)
+              if not writer.is_date_chunk_written(prod_enum, i, root_group=existing_z)
+          ]
+        else:
+          missing_indices = list(range(start_idx, end_idx))
       else:
+        existing_z = zarr.open_group(store_path, mode="r")
+        if resume:
+          missing_indices = [
+              i
+              for i in range(total_days)
+              if not writer.is_date_chunk_written(prod_enum, i, root_group=existing_z)
+          ]
+        else:
+          missing_indices = list(range(total_days))
+    else:
+      # Store exists: check date coordinates
+      try:
+        with xr.open_zarr(store_path) as existing_ds:
+          existing_dates = pd.to_datetime(existing_ds["date"].values)
+      except Exception:
+        existing_dates = None
+
+      if existing_dates is not None and not all_dates.equals(existing_dates) and not resume:
+        logger.info("Dates mismatch: reinitializing store %s for requested date range...", store_path)
+        _remove_store(store_path)
+        writer.initialize_zarr_store(prod_enum, basin_ids, all_dates)
+        existing_z = zarr.open_group(store_path, mode="r")
         missing_indices = list(range(total_days))
+      else:
+        existing_z = zarr.open_group(store_path, mode="r")
+        if resume:
+          missing_indices = [
+              i
+              for i in range(total_days)
+              if not writer.is_date_chunk_written(prod_enum, i, root_group=existing_z)
+          ]
+          logger.info(
+              "Resume mode: %d of %d days already written in %s",
+              total_days - len(missing_indices),
+              total_days,
+              prod_name,
+          )
+        else:
+          missing_indices = list(range(total_days))
 
   if not missing_indices:
     logger.info("Product %s is already 100%% complete. Consolidating metadata...", prod_name)
@@ -558,6 +671,7 @@ def extract_multimet_dask(
     id_column: Optional[str] = None,
     overwrite: bool = False,
     resume: bool = True,
+    append: bool = False,
     weights_cache: Optional[str] = None,
     use_bounding_box: bool = True,
     earthdata_username: Optional[str] = None,
@@ -582,6 +696,7 @@ def extract_multimet_dask(
     id_column: Optional column name for gauge ID in geometry file.
     overwrite: Whether to overwrite existing stores.
     resume: Whether to resume and only process missing days.
+    append: Whether to append new dates or new basins to existing stores.
     weights_cache: Optional path to cached weights .npz file or directory.
     use_bounding_box: Whether to use spatial bounding box reduction.
     earthdata_username: Optional NASA Earthdata username.
@@ -637,6 +752,7 @@ def extract_multimet_dask(
         id_column=id_column,
         overwrite=overwrite,
         resume=resume,
+        append=append,
         weights_cache=w_path,
         use_bounding_box=use_bounding_box,
         earthdata_username=earthdata_username,
@@ -730,6 +846,11 @@ def _build_parser() -> argparse.ArgumentParser:
       help="Overwrite existing Zarr stores.",
   )
   parser.add_argument(
+      "--append",
+      action="store_true",
+      help="Append to existing Zarr stores (either new dates or new basins).",
+  )
+  parser.add_argument(
       "--no-resume",
       dest="resume",
       action="store_false",
@@ -808,6 +929,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         id_column=args.id_column,
         overwrite=args.overwrite,
         resume=args.resume,
+        append=args.append,
         weights_cache=args.weights_cache,
         use_bounding_box=args.use_bounding_box,
         earthdata_username=args.earthdata_username,
