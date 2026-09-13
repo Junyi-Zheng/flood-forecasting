@@ -115,6 +115,26 @@ def test_era5_land_strict_missing_day_handling(basins_gdf):
     assert np.all(np.isnan(res[band]))
 
 
+def test_era5_land_grid_resolution_by_source():
+  """Verifies ERA5-Land extractor configures 0.25 deg for WB2 and 0.1 deg for GRIB."""
+  ext_wb2 = ERA5LandExtractor(source="wb2")
+  assert ext_wb2.lats.shape == (721,)
+  assert ext_wb2.lons.shape == (1440,)
+  assert np.isclose(abs(ext_wb2.lats[1] - ext_wb2.lats[0]), 0.25)
+  assert np.isclose(abs(ext_wb2.lons[1] - ext_wb2.lons[0]), 0.25)
+  assert np.isclose(ext_wb2.zonal_calc.dlat, 0.25)
+  assert np.isclose(ext_wb2.zonal_calc.dlon, 0.25)
+
+  ext_grib = ERA5LandExtractor(source="grib")
+  assert ext_grib.lats.shape == (1801,)
+  assert ext_grib.lons.shape == (3600,)
+  assert np.isclose(abs(ext_grib.lats[1] - ext_grib.lats[0]), 0.1)
+  assert np.isclose(abs(ext_grib.lons[1] - ext_grib.lons[0]), 0.1)
+  assert np.isclose(ext_grib.zonal_calc.dlat, 0.1)
+  assert np.isclose(ext_grib.zonal_calc.dlon, 0.1)
+
+
+
 def test_imerg_daily_extraction(tmp_path, basins_gdf):
   """Tests IMERG extractor on synthetic daily NetCDF file."""
   basin_ids = list(basins_gdf.index)

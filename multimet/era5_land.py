@@ -137,18 +137,26 @@ class ERA5LandExtractor(BaseExtractor):
           if data_dir is not None
           else DEFAULT_STORAGE_PATHS[Product.ERA5_LAND]["wb2_s2s_zarr"]
       )
+      # WeatherBench 2 ERA5 0.25 deg grid: 721 lats x 1440 lons
+      self.lats = np.linspace(90.0, -90.0, 721, dtype=np.float64)
+      lons_raw = np.linspace(0.0, 359.75, 1440, dtype=np.float64)
+      lons_shifted = np.where(lons_raw > 180.0, lons_raw - 360.0, lons_raw)
+      self.sort_lon_idx = np.argsort(lons_shifted)
+      self.lons = lons_shifted[self.sort_lon_idx]
+      self.zonal_calc = ZonalWeightCalculator(
+          self.lats, self.lons, cell_res_lat=0.25, cell_res_lon=0.25
+      )
     else:
       self.data_dir = data_dir if data_dir is not None else ""
-
-    # Standard ERA5-Land grid: 1801 lats x 3600 lons (0.1 deg) for GRIB files
-    self.lats = np.linspace(90.0, -90.0, 1801, dtype=np.float64)
-    lons_raw = np.linspace(0.0, 359.9, 3600, dtype=np.float64)
-    lons_shifted = np.where(lons_raw > 180.0, lons_raw - 360.0, lons_raw)
-    self.sort_lon_idx = np.argsort(lons_shifted)
-    self.lons = lons_shifted[self.sort_lon_idx]
-    self.zonal_calc = ZonalWeightCalculator(
-        self.lats, self.lons, cell_res_lat=0.1, cell_res_lon=0.1
-    )
+      # Standard ERA5-Land grid: 1801 lats x 3600 lons (0.1 deg) for GRIB files
+      self.lats = np.linspace(90.0, -90.0, 1801, dtype=np.float64)
+      lons_raw = np.linspace(0.0, 359.9, 3600, dtype=np.float64)
+      lons_shifted = np.where(lons_raw > 180.0, lons_raw - 360.0, lons_raw)
+      self.sort_lon_idx = np.argsort(lons_shifted)
+      self.lons = lons_shifted[self.sort_lon_idx]
+      self.zonal_calc = ZonalWeightCalculator(
+          self.lats, self.lons, cell_res_lat=0.1, cell_res_lon=0.1
+      )
 
   def _read_hourly_grib(self, grib_path: str) -> Dict[str, np.ndarray]:
     """Reads 2D meteorological fields from an ERA5-Land hourly GRIB file.
