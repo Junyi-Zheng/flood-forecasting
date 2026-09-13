@@ -119,8 +119,16 @@ def configure_gcp_project(project: Optional[str] = None) -> Optional[str]:
 
   # Configure environment variables for libraries that read from env
   os.environ["GOOGLE_CLOUD_PROJECT"] = detected
-  os.environ["GOOGLE_CLOUD_QUOTA_PROJECT"] = detected
   os.environ["CLOUDSDK_CORE_PROJECT"] = detected
+
+  # Ensure GOOGLE_CLOUD_QUOTA_PROJECT is NOT set. Setting a quota project
+  # forces google-auth to send the 'x-goog-user-project' header on every API call.
+  # For standard Google Cloud Storage buckets (non-requester-pays), adding
+  # 'x-goog-user-project' triggers a Service Usage API permission check
+  # ('serviceusage.services.use') which fails for user credentials in corporate
+  # environments. Standard GCS buckets bill storage directly to the bucket owner
+  # and only require object-level IAM permissions (storage.objects.*).
+  os.environ.pop("GOOGLE_CLOUD_QUOTA_PROJECT", None)
 
   # Configure fsspec for gs / gcs protocols
   try:

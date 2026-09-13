@@ -281,7 +281,7 @@ def test_gcp_project_autodetection_and_configuration(monkeypatch):
   proj = configure_gcp_project("configured-proj-789")
   assert proj == "configured-proj-789"
   assert os.environ.get("GOOGLE_CLOUD_PROJECT") == "configured-proj-789"
-  assert os.environ.get("GOOGLE_CLOUD_QUOTA_PROJECT") == "configured-proj-789"
+  assert "GOOGLE_CLOUD_QUOTA_PROJECT" not in os.environ
   assert fsspec.config.conf.get("gs", {}).get("project") == "configured-proj-789"
   assert fsspec.config.conf.get("gcs", {}).get("project") == "configured-proj-789"
 
