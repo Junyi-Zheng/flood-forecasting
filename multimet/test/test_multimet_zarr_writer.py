@@ -204,7 +204,7 @@ def test_reject_simultaneous_2d_expansion(writer: MultiMetZarrWriter):
     writer.write_or_append(ds_both, Product.CPC)
 
 
-def test_reject_prepending_historical_dates(writer: MultiMetZarrWriter):
+def test_expand_date_range_prepending_and_overlap(writer: MultiMetZarrWriter):
   basins = ["basin_1"]
   dates = pd.date_range("2020-01-10", periods=5, freq="D")
   ds = xr.Dataset(
@@ -213,9 +213,44 @@ def test_reject_prepending_historical_dates(writer: MultiMetZarrWriter):
   )
   writer.write_or_append(ds, Product.CPC)
 
+  # 1. Prepend earlier dates: 2020-01-01 to 2020-01-03
   earlier_dates = pd.date_range("2020-01-01", periods=3, freq="D")
-  with pytest.raises(ValueError, match="Cannot prepend or insert historical dates"):
-    writer.append_dates(Product.CPC, earlier_dates)
+  all_dates, indices = writer.expand_date_range(Product.CPC, earlier_dates)
+
+  assert len(all_dates) == 8
+  assert indices == [0, 1, 2]
+
+  store_path = writer.get_store_path(Product.CPC)
+  with xr.open_zarr(store_path) as res_ds:
+    # First 3 days should be NaN (unwritten skeleton)
+    assert np.isnan(res_ds["cpc_precipitation"].values[0, :3]).all()
+    # Days 3..8 (the original 5 dates) should be preserved
+    np.testing.assert_array_equal(
+        res_ds["cpc_precipitation"].values[0, 3:],
+        np.ones(5, dtype=np.float32),
+    )
+
+  # 2. Prepending via append_dates also seamlessly delegates to expand_date_range
+  even_earlier = pd.date_range("2019-12-30", periods=2, freq="D")
+  start_idx, end_idx = writer.append_dates(Product.CPC, even_earlier)
+  assert start_idx == 0
+  assert end_idx == 2
+  info = writer.get_store_info(Product.CPC)
+  assert len(info["dates"]) == 10
+  with xr.open_zarr(store_path) as res_ds2:
+    # Original data at 2020-01-10..14 should now be shifted to indices 5..10
+    np.testing.assert_array_equal(
+        res_ds2["cpc_precipitation"].values[0, 5:],
+        np.ones(5, dtype=np.float32),
+    )
+    # The earlier 5 days should be NaN
+    assert np.isnan(res_ds2["cpc_precipitation"].values[0, :5]).all()
+
+  # 3. Partial overlap without expanding date range
+  overlap_dates = pd.date_range("2020-01-10", periods=3, freq="D")
+  all_dates3, indices3 = writer.expand_date_range(Product.CPC, overlap_dates)
+  assert len(all_dates3) == 10
+  assert indices3 == [5, 6, 7]
 
 
 def test_reject_mismatched_dates_on_append_basins(writer: MultiMetZarrWriter):
@@ -233,4 +268,71 @@ def test_reject_mismatched_dates_on_append_basins(writer: MultiMetZarrWriter):
   )
   with pytest.raises(ValueError, match="dates mismatch"):
     writer.append_basins(Product.CPC, ds_mismatched_dates)
+
+
+def test_write_or_append_prepending_and_rewriting(writer: MultiMetZarrWriter):
+  """Verifies write_or_append supports prepending earlier dates and updating overlapping dates."""
+  basins = ["basin_1"]
+  # Initial dataset: 2020-01-05 to 2020-01-07 (3 days, all 1.0)
+  dates_init = pd.date_range("2020-01-05", periods=3, freq="D")
+  ds_init = xr.Dataset(
+      data_vars={"cpc_precipitation": (["basin", "date"], np.ones((1, 3), dtype=np.float32))},
+      coords={"basin": basins, "date": dates_init.values},
+  )
+  writer.write_or_append(ds_init, Product.CPC)
+
+  # Second dataset: 2020-01-03 to 2020-01-05 (prepending 03, 04, overlapping 05 with 2.0)
+  dates_update = pd.date_range("2020-01-03", periods=3, freq="D")
+  ds_update = xr.Dataset(
+      data_vars={"cpc_precipitation": (["basin", "date"], np.full((1, 3), 2.0, dtype=np.float32))},
+      coords={"basin": basins, "date": dates_update.values},
+  )
+  writer.write_or_append(ds_update, Product.CPC)
+
+  store_path = writer.get_store_path(Product.CPC)
+  with xr.open_zarr(store_path) as res_ds:
+    # Dates should now span 2020-01-03 to 2020-01-07 (5 days)
+    assert len(res_ds["date"]) == 5
+    vals = res_ds["cpc_precipitation"].values[0]
+    # 2020-01-03, 04, 05 should be 2.0
+    np.testing.assert_array_equal(vals[:3], [2.0, 2.0, 2.0])
+    # 2020-01-06, 07 should still be 1.0
+    np.testing.assert_array_equal(vals[3:], [1.0, 1.0])
+
+
+def test_expand_date_range_forecast_product(writer: MultiMetZarrWriter):
+  """Verifies date expansion (prepending and postpending) works on 3D forecast stores."""
+  basins = ["basin_A"]
+  dates = pd.date_range("2020-01-05", periods=2, freq="D")
+  leads = pd.to_timedelta(range(1, 11), unit="D")
+  shape = (len(basins), len(dates), len(leads))
+  data_vars = {
+      band: (
+          ["basin", "date", "lead_time"],
+          np.ones(shape, dtype=np.float32),
+      )
+      for band in PRODUCT_BANDS[Product.HRES]
+  }
+  ds = xr.Dataset(
+      data_vars=data_vars,
+      coords={"basin": basins, "date": dates.values, "lead_time": leads.values},
+  )
+  writer.write_or_append(ds, Product.HRES)
+
+  # Prepend 2 days and postpend 1 day
+  req_dates = pd.date_range("2020-01-03", periods=5, freq="D")
+  all_dates, indices = writer.expand_date_range(Product.HRES, req_dates)
+  assert len(all_dates) == 5
+  assert indices == [0, 1, 2, 3, 4]
+
+  store_path = writer.get_store_path(Product.HRES)
+  with xr.open_zarr(store_path) as res_ds:
+    vals = res_ds["hres_surface_net_solar_radiation"].values
+    assert vals.shape == (1, 5, 10)
+    # Days 0, 1 (prepended 03, 04) should be NaN
+    assert np.isnan(vals[0, :2, :]).all()
+    # Days 2, 3 (original 05, 06) should be 1.0
+    np.testing.assert_array_equal(vals[0, 2:4, :], np.ones((2, 10), dtype=np.float32))
+    # Day 4 (postpended 07) should be NaN
+    assert np.isnan(vals[0, 4, :]).all()
 

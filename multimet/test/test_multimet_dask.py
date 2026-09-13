@@ -408,7 +408,7 @@ def test_dask_reject_simultaneous_2d_expansion(dask_client, tmp_path):
       use_bounding_box=True,
   )
 
-  # 2. Attempt to add both new basins AND new dates
+  # 2. Attempt to add both new basins AND new dates (even without explicit append flag)
   with pytest.raises(ValueError, match="Cannot append both new basins .* and new dates"):
     extract_product_dask(
         product="CPC",
@@ -419,8 +419,131 @@ def test_dask_reject_simultaneous_2d_expansion(dask_client, tmp_path):
         client=dask_client,
         source="public",
         use_bounding_box=True,
-        append=True,
     )
+
+
+def test_dask_automatic_append_without_flag(dask_client):
+  """Verifies that omitting the append flag automatically appends new dates."""
+  if not _TEST_BASINS_PATH.exists():
+    pytest.skip(f"Test basins GeoJSON not found at {_TEST_BASINS_PATH}")
+
+  with tempfile.TemporaryDirectory() as tmp_dir:
+    # 1. Initial extraction of 2 days
+    extract_product_dask(
+        product="CPC",
+        basins=_TEST_BASINS_PATH,
+        output_dir=tmp_dir,
+        start_date="2020-01-01",
+        end_date="2020-01-02",
+        client=dask_client,
+        source="public",
+        use_bounding_box=True,
+    )
+
+    # 2. Append day 3 without specifying append=True (omitting append flag)
+    extract_product_dask(
+        product="CPC",
+        basins=_TEST_BASINS_PATH,
+        output_dir=tmp_dir,
+        start_date="2020-01-01",
+        end_date="2020-01-03",
+        client=dask_client,
+        source="public",
+        use_bounding_box=True,
+    )
+
+    store_path = MultiMetZarrWriter(tmp_dir).get_store_path(Product.CPC)
+    ds = xr.open_zarr(store_path)
+    assert ds["cpc_precipitation"].shape == (5, 3)
+    assert np.all(~np.isnan(ds["cpc_precipitation"].values))
+
+
+def test_dask_prepend_dates_and_overlap_nowcast(dask_client):
+  """Verifies Dask can prepend earlier dates and handle overlapping dates automatically."""
+  if not _TEST_BASINS_PATH.exists():
+    pytest.skip(f"Test basins GeoJSON not found at {_TEST_BASINS_PATH}")
+
+  with tempfile.TemporaryDirectory() as tmp_dir:
+    # 1. Initial extraction of 2 days: 2020-01-02 and 2020-01-03
+    extract_product_dask(
+        product="CPC",
+        basins=_TEST_BASINS_PATH,
+        output_dir=tmp_dir,
+        start_date="2020-01-02",
+        end_date="2020-01-03",
+        client=dask_client,
+        source="public",
+        use_bounding_box=True,
+    )
+
+    store_path = MultiMetZarrWriter(tmp_dir).get_store_path(Product.CPC)
+    ds1 = xr.open_zarr(store_path)
+    assert ds1["cpc_precipitation"].shape == (5, 2)
+    val_jan3 = ds1["cpc_precipitation"].values[:, 1].copy()
+
+    # 2. Run with earlier start date: 2020-01-01 to 2020-01-02 (prepending Jan 01, overlapping Jan 02)
+    extract_product_dask(
+        product="CPC",
+        basins=_TEST_BASINS_PATH,
+        output_dir=tmp_dir,
+        start_date="2020-01-01",
+        end_date="2020-01-02",
+        client=dask_client,
+        source="public",
+        use_bounding_box=True,
+    )
+
+    ds2 = xr.open_zarr(store_path)
+    # Store should now span 3 days: 2020-01-01, 2020-01-02, 2020-01-03
+    assert ds2["cpc_precipitation"].shape == (5, 3)
+    dates_str = [pd.to_datetime(d).strftime("%Y-%m-%d") for d in ds2["date"].values]
+    assert dates_str == ["2020-01-01", "2020-01-02", "2020-01-03"]
+
+    # All 3 days must be populated and non-NaN
+    assert np.all(~np.isnan(ds2["cpc_precipitation"].values))
+    # Original Jan 03 data must be preserved at index 2
+    np.testing.assert_array_equal(ds2["cpc_precipitation"].values[:, 2], val_jan3)
+
+
+def test_dask_rewrite_dates_nowcast(dask_client):
+  """Verifies Dask can rewrite existing dates when resume=False without overwrite=True."""
+  if not _TEST_BASINS_PATH.exists():
+    pytest.skip(f"Test basins GeoJSON not found at {_TEST_BASINS_PATH}")
+
+  with tempfile.TemporaryDirectory() as tmp_dir:
+    # 1. Initial extraction of 2 days
+    extract_product_dask(
+        product="CPC",
+        basins=_TEST_BASINS_PATH,
+        output_dir=tmp_dir,
+        start_date="2020-01-01",
+        end_date="2020-01-02",
+        client=dask_client,
+        source="public",
+        use_bounding_box=True,
+    )
+
+    store_path = MultiMetZarrWriter(tmp_dir).get_store_path(Product.CPC)
+    ds1 = xr.open_zarr(store_path)
+    val1 = ds1["cpc_precipitation"].values.copy()
+
+    # 2. Run with resume=False over the same dates (rewrite mode)
+    extract_product_dask(
+        product="CPC",
+        basins=_TEST_BASINS_PATH,
+        output_dir=tmp_dir,
+        start_date="2020-01-01",
+        end_date="2020-01-02",
+        client=dask_client,
+        source="public",
+        use_bounding_box=True,
+        resume=False,
+    )
+
+    ds2 = xr.open_zarr(store_path)
+    assert ds2["cpc_precipitation"].shape == (5, 2)
+    assert np.all(~np.isnan(ds2["cpc_precipitation"].values))
+    np.testing.assert_allclose(ds2["cpc_precipitation"].values, val1, rtol=1e-5, atol=1e-5)
 
 
 

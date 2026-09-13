@@ -497,16 +497,10 @@ class MultiMetZarrWriter:
       logger.info("All requested dates already exist in store %s", store_path)
       return (len(existing_dates), len(existing_dates))
 
-    # Verify chronological ordering
-    if len(existing_dates) > 0:
-      max_existing = existing_dates.max()
-      min_new = min(dates_to_add)
-      if min_new <= max_existing:
-        raise ValueError(
-            f"Cannot prepend or insert historical dates into store at {store_path}. "
-            f"Min new date ({min_new.strftime('%Y-%m-%d')}) must be strictly after "
-            f"existing store end date ({max_existing.strftime('%Y-%m-%d')})."
-        )
+    # If prepending or non-contiguous, delegate to expand_date_range
+    if len(existing_dates) > 0 and min(dates_to_add) <= existing_dates.max():
+      all_dates, indices = self.expand_date_range(product, parsed_dates)
+      return (indices[0], indices[-1] + 1)
 
     # Sort dates chronologically
     dates_to_add = sorted(dates_to_add)
@@ -544,6 +538,7 @@ class MultiMetZarrWriter:
 
     nan_ds = xr.Dataset(data_vars=nan_vars, coords=coords).chunk(chunk_spec)
     _safe_to_zarr(nan_ds, store_path, append_dim="date", consolidated=True)
+    self._open_groups.pop(product, None)
 
     logger.info(
         "Successfully expanded %s store dates from %d to %d days (+%d days)",
@@ -553,6 +548,111 @@ class MultiMetZarrWriter:
         len(dates_to_add),
     )
     return (old_len, new_len)
+
+  def expand_date_range(
+      self,
+      product: Product,
+      requested_dates: Sequence[Union[pd.Timestamp, str, np.datetime64]],
+  ) -> Tuple[pd.DatetimeIndex, List[int]]:
+    """Expands the store's date dimension if needed to cover requested_dates.
+
+    Supports:
+    - Postpending dates (dates after existing end date).
+    - Prepending dates (dates before existing start date).
+    - Partial or full overlaps with existing dates.
+
+    Args:
+      product: MultiMet Product enum.
+      requested_dates: Sequence of timestamps or date strings to ensure are present.
+
+    Returns:
+      Tuple of (all_store_dates, requested_date_indices_in_store).
+    """
+    store_path = self.get_store_path(product)
+    info = self.get_store_info(product)
+    if info is None:
+      raise FileNotFoundError(
+          f"Cannot expand date range: store does not exist at {store_path}"
+      )
+
+    existing_dates = pd.DatetimeIndex(info["dates"])
+    req_dates = pd.DatetimeIndex(pd.to_datetime(requested_dates)).sort_values()
+
+    self._open_groups.pop(product, None)
+
+    # If all requested dates are already within existing dates, no resize is required
+    if req_dates.isin(existing_dates).all():
+      indices = [int(existing_dates.get_loc(d)) for d in req_dates]
+      return (existing_dates, indices)
+
+    union_dates = existing_dates.union(req_dates).sort_values()
+    min_existing = existing_dates.min()
+    max_existing = existing_dates.max()
+    new_dates_to_add = [d for d in union_dates if d not in set(existing_dates)]
+
+    # Fast path: all new dates are strictly after the existing store's end date
+    if all(d > max_existing for d in new_dates_to_add):
+      self.append_dates(product, new_dates_to_add)
+      self._open_groups.pop(product, None)
+      updated_info = self.get_store_info(product)
+      updated_dates = pd.DatetimeIndex(updated_info["dates"])
+      indices = [int(updated_dates.get_loc(d)) for d in req_dates]
+      return (updated_dates, indices)
+
+    # Prepending or internal gap: reindex existing dataset to union_dates with NaN fill
+    logger.info(
+        "Prepending/reindexing %s store dates from [%s..%s] to [%s..%s]...",
+        product.value,
+        min_existing.strftime("%Y-%m-%d"),
+        max_existing.strftime("%Y-%m-%d"),
+        union_dates.min().strftime("%Y-%m-%d"),
+        union_dates.max().strftime("%Y-%m-%d"),
+    )
+    prod_type = PRODUCT_TYPES[product]
+    is_forecast = prod_type == ProductType.FORECAST
+    num_basins = len(info["basins"])
+    chunk_spec = {"basin": num_basins, "date": 1}
+    if is_forecast:
+      chunk_spec["lead_time"] = FORECAST_LEAD_DAYS[product]
+
+    with xr.open_zarr(store_path) as existing_ds:
+      expanded_ds = existing_ds.reindex(
+          date=union_dates.values, fill_value=np.nan
+      ).chunk(chunk_spec)
+      tmp_swap_dir = os.path.join(
+          self.output_dir, f".tmp_swap_{product.value}_{int(time.time() * 1000)}"
+      )
+      tmp_writer = MultiMetZarrWriter(tmp_swap_dir)
+      tmp_swap_path = tmp_writer.get_store_path(product)
+      _safe_to_zarr(expanded_ds, tmp_swap_path, mode="w", consolidated=True)
+
+    # Swap into store_path
+    try:
+      import fsspec
+      fs, fs_path = fsspec.core.url_to_fs(store_path)
+      _, tmp_fs_path = fsspec.core.url_to_fs(tmp_swap_path)
+      if fs.exists(fs_path):
+        fs.rm(fs_path, recursive=True)
+      if hasattr(fs, "mv"):
+        fs.mv(tmp_fs_path, fs_path, recursive=True)
+      else:
+        fs.copy(tmp_fs_path, fs_path, recursive=True)
+        fs.rm(tmp_fs_path, recursive=True)
+    except Exception:
+      if os.path.exists(store_path):
+        shutil.rmtree(store_path, ignore_errors=True)
+      shutil.move(tmp_swap_path, store_path)
+
+    try:
+      if os.path.exists(tmp_swap_dir):
+        shutil.rmtree(tmp_swap_dir, ignore_errors=True)
+    except Exception:
+      pass
+
+    self._open_groups.pop(product, None)
+    self.consolidate_metadata(product)
+    indices = [int(union_dates.get_loc(d)) for d in req_dates]
+    return (union_dates, indices)
 
   def append_basins(
       self,
@@ -580,7 +680,7 @@ class MultiMetZarrWriter:
       )
 
     # Validate schema
-    ds_to_write = new_ds.copy()
+    ds_to_write = new_ds.sortby("date").copy()
     for var in ds_to_write.data_vars:
       if ds_to_write[var].dtype != np.float32:
         ds_to_write[var] = ds_to_write[var].astype(np.float32)
@@ -663,6 +763,7 @@ class MultiMetZarrWriter:
     self.validate_dataset_schema(ds_to_write, product)
     store_path = self.get_store_path(product)
     prod_type = PRODUCT_TYPES[product]
+    is_forecast = prod_type == ProductType.FORECAST
     chunk_spec = (
         DEFAULT_CHUNKS_NOWCAST
         if prod_type == ProductType.NOWCAST
@@ -717,22 +818,48 @@ class MultiMetZarrWriter:
               "Please either append dates for existing basins, or append new basins across existing dates."
           )
 
-        # Case 1: Same basins, appending along date dimension
+        # Case 1: Same basins, adding/updating along date dimension
         if (
             incoming_basins_set == existing_basins_set
             and not overwrite_existing_basins
         ):
           new_dates = [d for d in incoming_dates if d not in existing_dates_set]
-          if not new_dates:
+          if not new_dates and not incoming_dates:
             return store_path
-          new_dates_dt64 = [d.to_datetime64() for d in new_dates]
-          new_slice = ds_to_write.sel(
-              basin=existing_basins_list, date=new_dates_dt64
-          )
-          new_slice = new_slice.chunk(chunk_spec)
-          _safe_to_zarr(
-              new_slice, local_target, append_dim="date", consolidated=True
-          )
+
+          # Pure postpending fast-path
+          if (
+              new_dates
+              and existing_dates_set
+              and min(new_dates) > max(existing_dates_set)
+              and len(new_dates) == len(incoming_dates)
+          ):
+            new_dates_dt64 = [d.to_datetime64() for d in new_dates]
+            new_slice = ds_to_write.sel(
+                basin=existing_basins_list, date=new_dates_dt64
+            )
+            new_slice = new_slice.chunk(chunk_spec)
+            _safe_to_zarr(
+                new_slice, local_target, append_dim="date", consolidated=True
+            )
+            self._open_groups.pop(product, None)
+            self.consolidate_metadata(product)
+            return store_path
+          else:
+            # Prepending, overlapping, or rewriting dates
+            all_dates, indices = self.expand_date_range(product, incoming_dates)
+            self._open_groups.pop(product, None)
+            z_root = zarr.open_group(local_target, mode="r+")
+            ds_aligned = ds_to_write.sel(basin=existing_basins_list)
+            for var in ds_aligned.data_vars:
+              vals = ds_aligned[var].values.astype(np.float32)
+              for local_idx, store_idx in enumerate(indices):
+                if is_forecast:
+                  z_root[var][:, store_idx, :] = vals[:, local_idx, :]
+                else:
+                  z_root[var][:, store_idx] = vals[:, local_idx]
+            self.consolidate_metadata(product)
+            return store_path
         elif overwrite_existing_basins:
           keep_basins = [
               b for b in existing_basins_list if b not in incoming_basins_set

@@ -397,8 +397,9 @@ def extract_product_dask(
     writer.initialize_zarr_store(prod_enum, basin_ids, all_dates)
     missing_indices = list(range(total_days))
   else:
+    # Store already exists and overwrite is False: update/append mode
     store_info = writer.get_store_info(prod_enum)
-    if append and store_info is not None:
+    if store_info is not None:
       store_basins = set(store_info["basins"])
       store_dates = pd.DatetimeIndex(store_info["dates"])
       new_basins = [b for b in basin_ids if b not in store_basins]
@@ -411,13 +412,13 @@ def extract_product_dask(
             f"simultaneously to existing Zarr store at {store_path}. "
             "Zarr arrays require a dense rectangular coordinate grid; expanding two dimensions at once "
             "leaves unpopulated cross-quadrants. Please run two sequential steps: "
-            "first append dates for existing basins, then append new basins for the full date range (or vice versa)."
+            "first update dates for existing basins, then append new basins for the full date range (or vice versa)."
         )
 
       if new_basins:
         # Appending new basins across existing store date range
         logger.info(
-            "Append mode: staging parallel extraction of %d new basins for %s across %d existing dates [%s..%s]...",
+            "Appending %d new basins to %s across %d existing dates [%s..%s]...",
             len(new_basins),
             prod_name,
             len(store_dates),
@@ -451,7 +452,6 @@ def extract_product_dask(
               netrc_path=netrc_path,
               gcp_project=gcp_project,
               show_progress=show_progress,
-              append=False,
               **extractor_extra_kwargs,
           )
           tmp_writer = MultiMetZarrWriter(tmp_output_dir)
@@ -474,68 +474,35 @@ def extract_product_dask(
               shutil.rmtree(tmp_output_dir, ignore_errors=True)
         return store_path
 
-      elif new_dates:
-        # Appending new dates for existing basins
-        logger.info(
-            "Append mode: expanding %s store dates by %d days [%s..%s]...",
-            prod_name,
-            len(new_dates),
-            new_dates[0].strftime("%Y-%m-%d"),
-            new_dates[-1].strftime("%Y-%m-%d"),
-        )
-        start_idx, end_idx = writer.append_dates(prod_enum, new_dates)
-        updated_info = writer.get_store_info(prod_enum)
-        all_dates = updated_info["dates"]
+      else:
+        # Existing basins: expand date range if needed (prepending, postpending, overlap, or rewrite)
+        all_store_dates, requested_indices = writer.expand_date_range(prod_enum, all_dates)
+        all_dates = all_store_dates
         total_days = len(all_dates)
         existing_z = zarr.open_group(store_path, mode="r")
         if resume:
           missing_indices = [
               i
-              for i in range(total_days)
-              if not writer.is_date_chunk_written(prod_enum, i, root_group=existing_z)
-          ]
-        else:
-          missing_indices = list(range(start_idx, end_idx))
-      else:
-        existing_z = zarr.open_group(store_path, mode="r")
-        if resume:
-          missing_indices = [
-              i
-              for i in range(total_days)
-              if not writer.is_date_chunk_written(prod_enum, i, root_group=existing_z)
-          ]
-        else:
-          missing_indices = list(range(total_days))
-    else:
-      # Store exists: check date coordinates
-      try:
-        with xr.open_zarr(store_path) as existing_ds:
-          existing_dates = pd.to_datetime(existing_ds["date"].values)
-      except Exception:
-        existing_dates = None
-
-      if existing_dates is not None and not all_dates.equals(existing_dates) and not resume:
-        logger.info("Dates mismatch: reinitializing store %s for requested date range...", store_path)
-        _remove_store(store_path)
-        writer.initialize_zarr_store(prod_enum, basin_ids, all_dates)
-        existing_z = zarr.open_group(store_path, mode="r")
-        missing_indices = list(range(total_days))
-      else:
-        existing_z = zarr.open_group(store_path, mode="r")
-        if resume:
-          missing_indices = [
-              i
-              for i in range(total_days)
+              for i in requested_indices
               if not writer.is_date_chunk_written(prod_enum, i, root_group=existing_z)
           ]
           logger.info(
-              "Resume mode: %d of %d days already written in %s",
-              total_days - len(missing_indices),
-              total_days,
+              "Resume mode: %d of %d requested days already populated in %s",
+              len(requested_indices) - len(missing_indices),
+              len(requested_indices),
               prod_name,
           )
         else:
-          missing_indices = list(range(total_days))
+          # Rewrite mode: re-extract all requested days
+          missing_indices = list(requested_indices)
+          logger.info(
+              "Rewrite mode: extracting all %d requested days for %s",
+              len(missing_indices),
+              prod_name,
+          )
+    else:
+      writer.initialize_zarr_store(prod_enum, basin_ids, all_dates)
+      missing_indices = list(range(total_days))
 
   if not missing_indices:
     logger.info("Product %s is already 100%% complete. Consolidating metadata...", prod_name)
