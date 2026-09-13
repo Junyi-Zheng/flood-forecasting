@@ -25,6 +25,7 @@ race conditions and scheduler memory bottlenecks.
 from __future__ import annotations
 
 import argparse
+import gc
 import logging
 import os
 import random
@@ -107,15 +108,20 @@ def init_dask_client(
     pass
 
   n_workers = num_workers or max(1, (os.cpu_count() or 2) - 1)
+  mem_limit = memory_limit
+  if str(mem_limit).strip().lower() in ("0", "none", "false"):
+    mem_limit = 0
+
   logger.info(
-      "Spawning local Dask cluster with %d workers (threads_per_worker=%d)...",
+      "Spawning local Dask cluster with %d workers (threads_per_worker=%d, memory_limit=%s)...",
       n_workers,
       threads_per_worker,
+      mem_limit,
   )
   cluster = distributed.LocalCluster(
       n_workers=n_workers,
       threads_per_worker=threads_per_worker,
-      memory_limit=memory_limit,
+      memory_limit=mem_limit,
       dashboard_address=dashboard_address,
       processes=True,
   )
@@ -215,6 +221,9 @@ def _extract_and_write_chunk_task(
       )
       time.sleep(backoff)
 
+  del ds
+  gc.collect()
+
   return {
       "status": "ok",
       "product": product_name,
@@ -236,6 +245,7 @@ def extract_product_dask(
     num_workers: Optional[int] = None,
     dask_scheduler: Optional[str] = None,
     batch_days: int = 1,
+    memory_limit: Union[str, int, float, None] = "auto",
     source: str = "public",
     id_column: Optional[str] = None,
     overwrite: bool = False,
@@ -448,6 +458,7 @@ def extract_product_dask(
   dask_client = client or init_dask_client(
       scheduler_address=dask_scheduler,
       num_workers=num_workers,
+      memory_limit=memory_limit,
   )
 
   # Scatter large immutable objects to cluster workers
@@ -529,6 +540,7 @@ def extract_multimet_dask(
     dask_scheduler: Optional[str] = None,
     num_workers: Optional[int] = None,
     batch_days: int = 1,
+    memory_limit: Union[str, int, float, None] = "auto",
     source: str = "public",
     id_column: Optional[str] = None,
     overwrite: bool = False,
@@ -552,6 +564,7 @@ def extract_multimet_dask(
     dask_scheduler: Address of remote Dask scheduler if applicable.
     num_workers: Number of workers for LocalCluster if local.
     batch_days: Number of days per Dask worker task (default 1).
+    memory_limit: Per-worker RAM limit ('auto', '0' to disable nanny limits, etc.).
     source: Source mode ('public' or 'local').
     id_column: Optional column name for gauge ID in geometry file.
     overwrite: Whether to overwrite existing stores.
@@ -583,6 +596,7 @@ def extract_multimet_dask(
   client = init_dask_client(
       scheduler_address=dask_scheduler,
       num_workers=num_workers,
+      memory_limit=memory_limit,
   )
 
   target_prods = (
@@ -605,6 +619,7 @@ def extract_multimet_dask(
         end_date=end_date,
         client=client,
         batch_days=batch_days,
+        memory_limit=memory_limit,
         source=source,
         id_column=id_column,
         overwrite=overwrite,
@@ -677,6 +692,12 @@ def _build_parser() -> argparse.ArgumentParser:
       type=int,
       default=1,
       help="Number of consecutive days per worker task.",
+  )
+  parser.add_argument(
+      "--memory_limit",
+      type=str,
+      default="auto",
+      help="Per-worker memory limit (e.g. '8GB', '0' to disable nanny kills, or 'auto').",
   )
   parser.add_argument(
       "--source",
@@ -769,6 +790,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         dask_scheduler=args.dask_scheduler,
         num_workers=args.num_workers,
         batch_days=args.batch_days,
+        memory_limit=args.memory_limit,
         source=args.source,
         id_column=args.id_column,
         overwrite=args.overwrite,

@@ -18,6 +18,7 @@ import datetime
 import os
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+import gc
 import logging
 import geopandas as gpd
 import numpy as np
@@ -342,6 +343,17 @@ class HRESExtractor(BaseExtractor):
         for band in PRODUCT_BANDS[Product.HRES]
     }
 
+    time_target = pd.Timestamp(f"{dt.strftime('%Y-%m-%d')}T00:00:00")
+    if self._cached_ds_raw is None:
+      if isinstance(self.data_dir, xr.Dataset):
+        self._cached_ds_raw = self.data_dir
+      else:
+        self._cached_ds_raw = open_wb2_hres_dataset(self.data_dir)
+
+    ds_raw = self._cached_ds_raw
+    if time_target not in pd.to_datetime(ds_raw.time.values):
+      return res_dict
+
     basin_keys = tuple(basins_gdf.index)
     if (
         self._cached_sub is None
@@ -363,13 +375,6 @@ class HRESExtractor(BaseExtractor):
       else:
         is_split = True
 
-      if self._cached_ds_raw is None:
-        if isinstance(self.data_dir, xr.Dataset):
-          self._cached_ds_raw = self.data_dir
-        else:
-          self._cached_ds_raw = open_wb2_hres_dataset(self.data_dir)
-
-      ds_raw = self._cached_ds_raw
       if not is_split:
         sub = ds_raw.sel(latitude=lat_slice, longitude=lon_slice)
       else:
@@ -397,38 +402,35 @@ class HRESExtractor(BaseExtractor):
     sub = self._cached_sub
     matrix = self._cached_matrix
 
-    time_target = pd.Timestamp(f"{dt.strftime('%Y-%m-%d')}T00:00:00")
-    if time_target not in pd.to_datetime(sub.time.values):
-      return res_dict
+    tp_var = (
+        "total_precipitation_24hr"
+        if "total_precipitation_24hr" in sub
+        else "total_precipitation"
+    )
+    has_tp24 = (tp_var == "total_precipitation_24hr")
 
-    target_vars = ["2m_temperature", "surface_pressure"]
-    if "total_precipitation_24hr" in sub:
-      target_vars.append("total_precipitation_24hr")
-    elif "total_precipitation" in sub:
-      target_vars.append("total_precipitation")
-
+    # 1. 2m Temperature
     with dask.config.set(scheduler="threads"):
-      day_sub = sub.sel(time=time_target)[target_vars].compute()
+      t2m_arr = sub["2m_temperature"].sel(time=time_target).compute().values - 273.15
+    t2m_reduced = matrix.reduce_3d(t2m_arr)
+    del t2m_arr
 
-    t2m_raw = day_sub["2m_temperature"].values - 273.15
-    sp_raw = day_sub["surface_pressure"].values * 0.001
-    has_tp24 = "total_precipitation_24hr" in day_sub
-    if has_tp24:
-      tp_24_raw = day_sub["total_precipitation_24hr"].values * 1000.0
-    else:
-      tp_raw = day_sub["total_precipitation"].values * 1000.0
+    # 2. Surface Pressure
+    with dask.config.set(scheduler="threads"):
+      sp_arr = sub["surface_pressure"].sel(time=time_target).compute().values * 0.001
+    sp_reduced = matrix.reduce_3d(sp_arr)
+    del sp_arr
 
-    t2m_reduced = matrix.reduce_3d(t2m_raw)
-    sp_reduced = matrix.reduce_3d(sp_raw)
-    if has_tp24:
-      tp_reduced = matrix.reduce_3d(tp_24_raw)
-    else:
-      tp_reduced = matrix.reduce_3d(tp_raw)
+    # 3. Total Precipitation
+    with dask.config.set(scheduler="threads"):
+      tp_arr = sub[tp_var].sel(time=time_target).compute().values * 1000.0
+    tp_reduced = matrix.reduce_3d(tp_arr)
+    del tp_arr
 
     for lt_day in range(1, 11):
       lt_pos = lt_day - 1
       step_slice = slice((lt_day - 1) * 4 + 1, lt_day * 4 + 1)
-      if lt_day * 4 >= t2m_raw.shape[0]:
+      if lt_day * 4 >= t2m_reduced.shape[1]:
         continue
 
       mean_t2m = np.nanmean(t2m_reduced[:, step_slice], axis=1)
@@ -445,8 +447,9 @@ class HRESExtractor(BaseExtractor):
       res_dict["hres_surface_pressure"][:, lt_pos] = mean_sp
       res_dict["hres_total_precipitation"][:, lt_pos] = np.maximum(0.0, p_tp)
 
-    # Note: hres_surface_net_solar_radiation and hres_surface_net_thermal_radiation
-    # remain np.nan as they are unavailable in WeatherBench 2 HRES archive.
+    del t2m_reduced, sp_reduced, tp_reduced
+    gc.collect()
+
     return res_dict
 
   def extract_day(
@@ -508,6 +511,47 @@ class HRESExtractor(BaseExtractor):
 
     ds_raw = open_wb2_hres_dataset(self.data_dir)
 
+    # Scope to valid requested times first to keep the Dask graph minimal
+    requested_times = [
+        pd.Timestamp(f"{dt.strftime('%Y-%m-%d')}T00:00:00")
+        for dt in date_idx
+    ]
+    ds_raw_times = pd.to_datetime(ds_raw.time.values)
+    valid_times = [t for t in requested_times if t in ds_raw_times]
+
+    if not valid_times:
+      ds_raw.close()
+      data_vars = {}
+      for band in expected_bands:
+        var_attrs = {}
+        if band in (
+            "hres_surface_net_solar_radiation",
+            "hres_surface_net_thermal_radiation",
+        ):
+          var_attrs = {
+              "status": "unavailable",
+              "comment": (
+                  "Surface radiation flux variables are unavailable in"
+                  " WeatherBench 2 HRES archive."
+              ),
+          }
+        data_vars[band] = (
+            ["basin", "date", "lead_time"],
+            data_dict[band],
+            var_attrs,
+        )
+      return xr.Dataset(
+          data_vars=data_vars,
+          coords={
+              "basin": basin_ids,
+              "date": date_idx.values,
+              "lead_time": lead_time_idx.values,
+          },
+          attrs=dict(PRODUCT_METADATA_ATTRS.get(Product.HRES, {})),
+      )
+
+    ds_raw = ds_raw.sel(time=valid_times)
+
     if use_bounding_box:
       bounds = basins_gdf.total_bounds  # (minx, miny, maxx, maxy)
       minx, miny, maxx, maxy = bounds
@@ -557,14 +601,12 @@ class HRESExtractor(BaseExtractor):
           cell_res_lon=0.25,
       )
 
-    target_vars = [
-        "2m_temperature",
-        "surface_pressure",
-    ]
-    if "total_precipitation_24hr" in sub:
-      target_vars.append("total_precipitation_24hr")
-    elif "total_precipitation" in sub:
-      target_vars.append("total_precipitation")
+    tp_var = (
+        "total_precipitation_24hr"
+        if "total_precipitation_24hr" in sub
+        else "total_precipitation"
+    )
+    has_tp24 = (tp_var == "total_precipitation_24hr")
 
     for d_pos, dt in enumerate(
         tqdm.tqdm(
@@ -578,33 +620,31 @@ class HRESExtractor(BaseExtractor):
         )
     ):
       time_target = pd.Timestamp(f"{dt.strftime('%Y-%m-%d')}T00:00:00")
-      if time_target not in pd.to_datetime(sub.time.values):
+      if time_target not in valid_times:
         continue
 
+      # 1. 2m Temperature
       with dask.config.set(scheduler="threads"):
-        day_sub = sub.sel(time=time_target)[target_vars].compute()
+        t2m_arr = sub["2m_temperature"].sel(time=time_target).compute().values - 273.15
+      t2m_reduced = matrix.reduce_3d(t2m_arr)
+      del t2m_arr
 
-      t2m_raw = day_sub["2m_temperature"].values - 273.15
-      sp_raw = day_sub["surface_pressure"].values * 0.001
-      has_tp24 = "total_precipitation_24hr" in day_sub
-      if has_tp24:
-        tp_24_raw = day_sub["total_precipitation_24hr"].values * 1000.0
-      else:
-        tp_raw = day_sub["total_precipitation"].values * 1000.0
+      # 2. Surface Pressure
+      with dask.config.set(scheduler="threads"):
+        sp_arr = sub["surface_pressure"].sel(time=time_target).compute().values * 0.001
+      sp_reduced = matrix.reduce_3d(sp_arr)
+      del sp_arr
 
-      # Vectorized sparse matrix reduction across all basins simultaneously:
-      # shape (N_basins, steps)
-      t2m_reduced = matrix.reduce_3d(t2m_raw)
-      sp_reduced = matrix.reduce_3d(sp_raw)
-      if has_tp24:
-        tp_reduced = matrix.reduce_3d(tp_24_raw)
-      else:
-        tp_reduced = matrix.reduce_3d(tp_raw)
+      # 3. Total Precipitation
+      with dask.config.set(scheduler="threads"):
+        tp_arr = sub[tp_var].sel(time=time_target).compute().values * 1000.0
+      tp_reduced = matrix.reduce_3d(tp_arr)
+      del tp_arr
 
       for lt_day in range(1, 11):
         lt_pos = lt_day - 1
         step_slice = slice((lt_day - 1) * 4 + 1, lt_day * 4 + 1)
-        if lt_day * 4 >= t2m_raw.shape[0]:
+        if lt_day * 4 >= t2m_reduced.shape[1]:
           continue
 
         mean_t2m = np.nanmean(t2m_reduced[:, step_slice], axis=1)
@@ -622,6 +662,9 @@ class HRESExtractor(BaseExtractor):
         data_dict["hres_total_precipitation"][:, d_pos, lt_pos] = np.maximum(
             0.0, p_tp
         )
+
+      del t2m_reduced, sp_reduced, tp_reduced
+      gc.collect()
 
     ds_raw.close()
 
