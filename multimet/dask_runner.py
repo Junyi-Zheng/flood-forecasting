@@ -758,30 +758,39 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
   prods = [p.strip() for p in args.products.split(",") if p.strip()]
   t0 = time.time()
   print(f"▶ Starting MultiMet Dask parallel extraction for: {prods}")
-  stores = extract_multimet_dask(
-      basins=args.basins_path,
-      output_dir=args.output_dir,
-      products=prods,
-      start_date=args.start_date,
-      end_date=args.end_date,
-      dask_scheduler=args.dask_scheduler,
-      num_workers=args.num_workers,
-      batch_days=args.batch_days,
-      source=args.source,
-      id_column=args.id_column,
-      overwrite=args.overwrite,
-      resume=args.resume,
-      weights_cache=args.weights_cache,
-      use_bounding_box=args.use_bounding_box,
-      earthdata_username=args.earthdata_username,
-      earthdata_password=args.earthdata_password,
-      earthdata_token=args.earthdata_token,
-      netrc_path=args.netrc_path,
-      gcp_project=args.gcp_project,
-  )
-  print(f"\n✓ Completed extraction of {len(stores)} products in {time.time() - t0:.2f}s:")
-  for prod, store_path in stores.items():
-    print(f"  • {prod:12s} -> {store_path}")
+  try:
+    stores = extract_multimet_dask(
+        basins=args.basins_path,
+        output_dir=args.output_dir,
+        products=prods,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        dask_scheduler=args.dask_scheduler,
+        num_workers=args.num_workers,
+        batch_days=args.batch_days,
+        source=args.source,
+        id_column=args.id_column,
+        overwrite=args.overwrite,
+        resume=args.resume,
+        weights_cache=args.weights_cache,
+        use_bounding_box=args.use_bounding_box,
+        earthdata_username=args.earthdata_username,
+        earthdata_password=args.earthdata_password,
+        earthdata_token=args.earthdata_token,
+        netrc_path=args.netrc_path,
+        gcp_project=args.gcp_project,
+    )
+    print(f"\n✓ Completed extraction of {len(stores)} products in {time.time() - t0:.2f}s:")
+    for prod, store_path in stores.items():
+      print(f"  • {prod:12s} -> {store_path}")
+  finally:
+    try:
+      client = distributed.get_client()
+      if client.cluster:
+        client.cluster.close()
+      client.close()
+    except Exception:
+      pass
 
 
 if __name__ == "__main__":
