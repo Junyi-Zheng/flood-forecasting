@@ -346,6 +346,7 @@ def extract_product_dask(
       fs, fs_path = fsspec.core.url_to_fs(p)
       if fs.exists(fs_path):
         fs.rm(fs_path, recursive=True)
+        time.sleep(1.0)
     except Exception as e:
       logger.warning("Error removing store %s with fsspec: %s", p, e)
       if os.path.isdir(p):

@@ -17,8 +17,10 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import random
 import shutil
 import tarfile
+import time
 from typing import Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
@@ -37,6 +39,8 @@ from multimet.config import (
     ProductType,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _safe_to_zarr(
     ds: xr.Dataset, store_path: Union[str, os.PathLike], **kwargs
@@ -47,12 +51,47 @@ def _safe_to_zarr(
   strings (<U22) and currently does not standardize consolidated metadata
   (.zmetadata). Targeting zarr_format=2 ensures seamless interoperability with
   Google/CNS Caravan datasets, NetCDF, and existing readers across Zarr 2.x and
-  3.x.
+  3.x. Includes exponential backoff retry for transient cloud storage errors.
   """
   sig = inspect.signature(xr.Dataset.to_zarr)
   if "zarr_format" in sig.parameters:
     kwargs.setdefault("zarr_format", 2)
-  ds.to_zarr(store_path, **kwargs)
+
+  max_retries = 5
+  for attempt in range(max_retries):
+    try:
+      ds.to_zarr(store_path, **kwargs)
+      return
+    except Exception as e:
+      err_str = str(e).lower()
+      is_transient = any(
+          code in err_str
+          for code in [
+              "forbidden",
+              "403",
+              "429",
+              "503",
+              "rate",
+              "quota",
+              "serviceusage",
+              "storage.objects",
+              "slowdown",
+          ]
+      )
+      if is_transient and attempt < max_retries - 1:
+        backoff = (2**attempt) + random.uniform(0.5, 2.0)
+        logger.warning(
+            "Transient GCS error during to_zarr for %s (attempt %d/%d): %s."
+            " Retrying in %.2fs...",
+            store_path,
+            attempt + 1,
+            max_retries,
+            e,
+            backoff,
+        )
+        time.sleep(backoff)
+      else:
+        raise
 
 
 class MultiMetZarrWriter:
