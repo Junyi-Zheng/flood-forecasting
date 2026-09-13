@@ -33,6 +33,7 @@ dependencies:
   - gh
   - h5netcdf=1.7.3
   - h5py=3.15.1  # Sets the underlying C library "hdf5", letting h5py set it.
+  - icechunk
   - ipython
   - jupyter
   - matplotlib=3.10.*
