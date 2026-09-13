@@ -40,6 +40,7 @@ import fsspec
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import psutil
 import tqdm
 import xarray as xr
 import zarr
@@ -109,14 +110,26 @@ def init_dask_client(
 
   n_workers = num_workers or max(1, (os.cpu_count() or 2) - 1)
   mem_limit = memory_limit
-  if str(mem_limit).strip().lower() in ("0", "none", "false"):
+  if str(mem_limit).strip().lower() in ("0", "none", "false", "unlimited"):
     mem_limit = 0
+    mem_str = "unlimited (no nanny limit)"
+  elif mem_limit == "auto":
+    try:
+      total_ram = psutil.virtual_memory().total
+      # Proportional allocation: divide 90% of host RAM evenly across workers
+      mem_limit = int((total_ram * 0.9) / n_workers)
+      mem_str = f"{mem_limit / (1024**3):.2f} GiB"
+    except Exception:
+      mem_limit = "auto"
+      mem_str = "auto"
+  else:
+    mem_str = str(mem_limit)
 
   logger.info(
       "Spawning local Dask cluster with %d workers (threads_per_worker=%d, memory_limit=%s)...",
       n_workers,
       threads_per_worker,
-      mem_limit,
+      mem_str,
   )
   cluster = distributed.LocalCluster(
       n_workers=n_workers,
