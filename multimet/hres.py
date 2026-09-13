@@ -42,14 +42,27 @@ from multimet.zonal import ZonalWeightCalculator, ZonalWeightMatrix
 
 
 def open_wb2_hres_dataset(zarr_url: Union[str, xr.Dataset]) -> xr.Dataset:
-  """Opens WeatherBench 2 HRES Zarr store."""
+  """Opens WeatherBench 2 HRES Zarr store, pruning unneeded 3D atmospheric levels."""
   if isinstance(zarr_url, xr.Dataset):
-    return zarr_url
-  if gcsfs is not None:
+    ds = zarr_url
+  elif gcsfs is not None:
     fs = gcsfs.GCSFileSystem(token="anon")
     mapper = fs.get_mapper(zarr_url)
-    return xr.open_zarr(mapper, decode_timedelta=False)
-  return xr.open_zarr(zarr_url, decode_timedelta=False)
+    ds = xr.open_zarr(mapper, decode_timedelta=False)
+  else:
+    ds = xr.open_zarr(zarr_url, decode_timedelta=False)
+
+  target_surface_vars = [
+      "2m_temperature",
+      "surface_pressure",
+      "total_precipitation_24hr",
+      "total_precipitation",
+      "total_precipitation_6hr",
+  ]
+  avail = [v for v in target_surface_vars if v in ds.data_vars]
+  if avail:
+    ds = ds[avail]
+  return ds
 
 
 def _compute_zonal_mean(
