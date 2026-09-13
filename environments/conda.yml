@@ -43,6 +43,7 @@ dependencies:
   - numpy=2.4.*
   - pandas=2.3.*
   - parso=0.8.5
+  - pip
   - pydantic=2.12.*
   - pytest
   - pytest-cov
@@ -62,3 +63,5 @@ dependencies:
   - tqdm=4.67.*
   - xarray=2025.12.0
   - zarr=3.1.5
+  - pip:
+    - dynamical-catalog
