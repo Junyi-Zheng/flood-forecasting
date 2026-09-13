@@ -33,6 +33,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+import dask
 import distributed
 import fsspec
 import geopandas as gpd
@@ -160,13 +161,14 @@ def _extract_and_write_chunk_task(
   prod_enum = Product[product_name]
   extractor = extractor_cls(**extractor_kwargs)
 
-  ds = extractor.extract_for_basins(
-      basins_gdf,
-      start_date=start_date_str,
-      end_date=end_date_str,
-      weights_matrix=weights_matrix,
-      use_bounding_box=use_bounding_box,
-  )
+  with dask.config.set(scheduler="threads"):
+    ds = extractor.extract_for_basins(
+        basins_gdf,
+        start_date=start_date_str,
+        end_date=end_date_str,
+        weights_matrix=weights_matrix,
+        use_bounding_box=use_bounding_box,
+    )
 
   num_days = end_idx - start_idx
   max_write_retries = 5

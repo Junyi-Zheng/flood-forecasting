@@ -23,6 +23,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import tqdm
+import dask
 import fsspec
 import xarray as xr
 import zarr
@@ -393,7 +394,8 @@ class HRESExtractor(BaseExtractor):
     elif "total_precipitation" in sub:
       target_vars.append("total_precipitation")
 
-    day_sub = sub.sel(time=time_target)[target_vars].compute()
+    with dask.config.set(scheduler="threads"):
+      day_sub = sub.sel(time=time_target)[target_vars].compute()
 
     t2m_raw = day_sub["2m_temperature"].values - 273.15
     sp_raw = day_sub["surface_pressure"].values * 0.001
@@ -566,7 +568,8 @@ class HRESExtractor(BaseExtractor):
       if time_target not in pd.to_datetime(sub.time.values):
         continue
 
-      day_sub = sub.sel(time=time_target)[target_vars].compute()
+      with dask.config.set(scheduler="threads"):
+        day_sub = sub.sel(time=time_target)[target_vars].compute()
 
       t2m_raw = day_sub["2m_temperature"].values - 273.15
       sp_raw = day_sub["surface_pressure"].values * 0.001

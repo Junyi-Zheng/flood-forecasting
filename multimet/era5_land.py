@@ -26,6 +26,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import tqdm
+import dask
 import fsspec
 import xarray as xr
 
@@ -524,7 +525,8 @@ class ERA5LandExtractor(BaseExtractor):
     ]
     avail_vars = [v for v in vars_needed if v in sub]
 
-    sub_data = sub[avail_vars].compute()
+    with dask.config.set(scheduler="threads"):
+      sub_data = sub[avail_vars].compute()
     sub_times = pd.to_datetime(sub_data.time.values)
 
     # Vectorized sparse matrix reduction across all variables and basins simultaneously

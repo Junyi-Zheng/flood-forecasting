@@ -22,6 +22,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import tqdm
+import dask
 import fsspec
 import xarray as xr
 
@@ -363,7 +364,8 @@ class GraphCastExtractor(BaseExtractor):
           "10m_u_component_of_wind",
           "10m_v_component_of_wind",
       ]
-      day_sub = sub.sel(time=time_target)[target_vars].compute()
+      with dask.config.set(scheduler="threads"):
+        day_sub = sub.sel(time=time_target)[target_vars].compute()
 
       t2m_grid = day_sub["2m_temperature"].values - 273.15
       tp_grid = day_sub["total_precipitation_6hr"].values * 1000.0
