@@ -227,6 +227,7 @@ def write_batch_to_zarr(
     target_zarr_url: str,
     project: str = DEFAULT_PROJECT,
     is_initial_write: bool = False,
+    consolidated: bool = False,
     max_retries: int = 5,
 ) -> None:
   """Writes or appends a batch of dates to the target Zarr store with exponential retries."""
@@ -268,14 +269,16 @@ def write_batch_to_zarr(
             }
         }
         ds_batch.to_zarr(
-            mapper, mode="w", consolidated=True, encoding=encoding
+            mapper, mode="w", consolidated=consolidated, encoding=encoding
         )
         logging.info("✓ Successfully initialized Zarr store.")
       else:
         logging.info(
             "Appending %d dates along time dimension...", len(ds_batch["time"])
         )
-        ds_batch.to_zarr(mapper, mode="a", append_dim="time", consolidated=True)
+        ds_batch.to_zarr(
+            mapper, mode="a", append_dim="time", consolidated=consolidated
+        )
         logging.info("✓ Successfully appended dates.")
       return
     except Exception as e:
@@ -429,6 +432,7 @@ def build_cpc_archive(
 
   is_first_write = not store_exists or overwrite
   processed_years = set()
+  has_consolidated = False
 
   if store_exists and not overwrite:
     try:
@@ -439,15 +443,21 @@ def build_cpc_archive(
               fsspec.get_mapper(full_target_url) if is_gcs else full_target_url
           )
       )
-      existing_ds = xr.open_zarr(mapper, consolidated=True)
+      if is_gcs and fs is not None:
+        has_consolidated = fs.exists(f"{clean_target}/.zmetadata")
+      elif not is_gcs:
+        has_consolidated = os.path.exists(os.path.join(full_target_url, ".zmetadata"))
+
+      existing_ds = xr.open_zarr(mapper, consolidated=has_consolidated)
       existing_times = pd.to_datetime(existing_ds["time"].values)
       max_existing_time = pd.Timestamp(existing_times.max())
       min_existing_time = pd.Timestamp(existing_times.min())
       logging.info(
-          "Existing store has %d dates from %s to %s.",
+          "Existing store has %d dates from %s to %s (Consolidated: %s).",
           len(existing_times),
           min_existing_time.strftime("%Y-%m-%d"),
           max_existing_time.strftime("%Y-%m-%d"),
+          has_consolidated,
       )
 
       # Determine which years are already fully written
@@ -512,6 +522,7 @@ def build_cpc_archive(
             full_target_url,
             project=project,
             is_initial_write=is_first_write,
+            consolidated=has_consolidated,
         )
         is_first_write = False
 
@@ -543,6 +554,7 @@ def build_cpc_archive(
           full_target_url,
           project=project,
           is_initial_write=is_first_write,
+          consolidated=has_consolidated,
       )
       is_first_write = False
 

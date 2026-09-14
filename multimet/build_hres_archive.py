@@ -362,6 +362,7 @@ def write_batch_to_zarr(
     target_zarr_url: str,
     project: str = DEFAULT_PROJECT,
     is_initial_write: bool = False,
+    consolidated: bool = False,
     max_retries: int = 5,
 ) -> None:
   """Writes or appends a batch of dates to the target Zarr store with retries."""
@@ -389,10 +390,10 @@ def write_batch_to_zarr(
             var: {"chunks": (1, 10, len(ds_batch["latitude"]), len(ds_batch["longitude"]))}
             for var in ds_batch.data_vars
         }
-        ds_batch.to_zarr(mapper, mode="w", consolidated=True, encoding=encoding)
+        ds_batch.to_zarr(mapper, mode="w", consolidated=consolidated, encoding=encoding)
       else:
         logging.info("Appending %d dates along time dimension...", len(ds_batch["time"]))
-        ds_batch.to_zarr(mapper, mode="a", append_dim="time", consolidated=True)
+        ds_batch.to_zarr(mapper, mode="a", append_dim="time", consolidated=consolidated)
       return
     except Exception as e:
       wait_secs = 5 * (2 ** attempt)
@@ -443,15 +444,19 @@ def build_hres_archive(
 
   fs = None
   store_exists = False
+  has_consolidated = False
   if is_local:
     store_exists = os.path.exists(os.path.join(clean_target, ".zmetadata")) or os.path.exists(os.path.join(clean_target, "zarr.json"))
+    has_consolidated = os.path.exists(os.path.join(clean_target, ".zmetadata"))
   elif gcsfs is not None:
     fs = gcsfs.GCSFileSystem(project=project, requester_pays=project)
-    store_exists = fs.exists(f"{clean_target}/.zmetadata") or fs.exists(f"{clean_target}/zarr.json")
+    has_consolidated = fs.exists(f"{clean_target}/.zmetadata")
+    store_exists = has_consolidated or fs.exists(f"{clean_target}/zarr.json")
   else:
     try:
       m = fsspec.get_mapper(full_target_url)
-      store_exists = ".zmetadata" in m or "zarr.json" in m
+      has_consolidated = ".zmetadata" in m
+      store_exists = has_consolidated or "zarr.json" in m
     except Exception:
       store_exists = False
 
@@ -473,7 +478,7 @@ def build_hres_archive(
         mapper = fs.get_mapper(clean_target)
       else:
         mapper = fsspec.get_mapper(full_target_url)
-      existing_ds = xr.open_zarr(mapper)
+      existing_ds = xr.open_zarr(mapper, consolidated=has_consolidated)
       max_existing_time = pd.Timestamp(existing_ds["time"].values.max())
       logging.info(
           "Existing store has %d dates up to %s.",
@@ -543,7 +548,7 @@ def build_hres_archive(
               },
           )
           write_batch_to_zarr(
-              ds_batch, full_target_url, project=project, is_initial_write=is_first_write
+              ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
           )
           is_first_write = False
           batch_dates = []
@@ -580,7 +585,7 @@ def build_hres_archive(
             },
         )
         write_batch_to_zarr(
-            ds_batch, full_target_url, project=project, is_initial_write=is_first_write
+            ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
         )
         is_first_write = False
         batch_dates = []
@@ -607,7 +612,7 @@ def build_hres_archive(
         },
     )
     write_batch_to_zarr(
-        ds_batch, full_target_url, project=project, is_initial_write=is_first_write
+        ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
     )
 
   logging.info("HRES archive build complete for %s to %s!", start_date, end_date)
