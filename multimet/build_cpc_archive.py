@@ -78,12 +78,14 @@ def ensure_psl_cpc_netcdf(
     return local_path
 
   url = NOAA_PSL_URL_TEMPLATE.format(year=year)
-  temp_path = f"{local_path}.tmp"
+  temp_path = f"{local_path}.tmp.{os.getpid()}.{time.time_ns()}"
   logging.info("Downloading NOAA PSL CPC NetCDF for %d from %s...", year, url)
 
   last_error = None
   for attempt in range(max_retries):
     try:
+      if os.path.exists(local_path) and os.path.getsize(local_path) > 1024 * 1024:
+        return local_path
       req = urllib.request.Request(
           url,
           headers={"User-Agent": "OpenMultiMet/1.1 (Google Research)"},
@@ -92,7 +94,8 @@ def ensure_psl_cpc_netcdf(
           temp_path, "wb"
       ) as out_f:
         shutil.copyfileobj(response, out_f)
-      os.replace(temp_path, local_path)
+      if not (os.path.exists(local_path) and os.path.getsize(local_path) > 1024 * 1024):
+        os.replace(temp_path, local_path)
       logging.info(
           "✓ Cached %s (%.1f MB)", local_path, os.path.getsize(local_path) / 1e6
       )
@@ -289,6 +292,63 @@ def write_batch_to_zarr(
       time.sleep(wait_secs)
 
 
+_worker_cache_dir: str = DEFAULT_CACHE_DIR
+_worker_start_date: Optional[pd.Timestamp] = None
+_worker_end_date: Optional[pd.Timestamp] = None
+_worker_cleanup_cache: bool = False
+
+
+def _init_cpc_worker(
+    cache_dir: str,
+    start_date: Optional[pd.Timestamp],
+    end_date: Optional[pd.Timestamp],
+    cleanup_cache: bool,
+) -> None:
+  global _worker_cache_dir, _worker_start_date, _worker_end_date, _worker_cleanup_cache
+  _worker_cache_dir = cache_dir
+  _worker_start_date = start_date
+  _worker_end_date = end_date
+  _worker_cleanup_cache = cleanup_cache
+
+
+def _extract_single_year(year: int) -> Tuple[int, Optional[xr.Dataset]]:
+  """Worker task to download and transform a single year of CPC precipitation."""
+  global _worker_cache_dir, _worker_start_date, _worker_end_date, _worker_cleanup_cache
+  t0 = time.time()
+  logging.info(
+      "Worker [%d] downloading CPC PSL NetCDF for year %d...",
+      os.getpid(),
+      year,
+  )
+  nc_path = ensure_psl_cpc_netcdf(year, cache_dir=_worker_cache_dir)
+
+  logging.info(
+      "Worker [%d] standardizing CPC dataset for year %d...",
+      os.getpid(),
+      year,
+  )
+  ds_year = process_cpc_netcdf_to_dataset(
+      nc_path,
+      target_start_date=_worker_start_date,
+      target_end_date=_worker_end_date,
+  )
+
+  if _worker_cleanup_cache and os.path.exists(nc_path):
+    try:
+      os.remove(nc_path)
+      logging.info("Cleaned up cached file: %s", nc_path)
+    except OSError:
+      pass
+
+  logging.info(
+      "Worker [%d] finished year %d in %.2fs",
+      os.getpid(),
+      year,
+      time.time() - t0,
+  )
+  return year, ds_year
+
+
 def build_cpc_archive(
     start_year: int = DEFAULT_START_YEAR,
     end_year: int = DEFAULT_END_YEAR,
@@ -299,6 +359,7 @@ def build_cpc_archive(
     cache_dir: str = DEFAULT_CACHE_DIR,
     cleanup_cache: bool = False,
     overwrite: bool = False,
+    num_workers: Optional[int] = None,
 ) -> None:
   """Main entry point to execute the NOAA CPC daily gridded archive build."""
   logging.basicConfig(
@@ -318,6 +379,8 @@ def build_cpc_archive(
       full_target_url.replace("gs://", "") if is_gcs else full_target_url
   )
 
+  if num_workers is None or num_workers <= 0:
+    num_workers = min(32, os.cpu_count() or 4)
 
   t_start_filter = pd.Timestamp(start_date) if start_date else None
   t_end_filter = pd.Timestamp(end_date) if end_date else None
@@ -329,10 +392,11 @@ def build_cpc_archive(
 
   years = list(range(start_year, end_year + 1))
   logging.info(
-      "Building CPC archive for %d years: %d to %d",
+      "Building CPC archive for %d years: %d to %d (Workers: %d)",
       len(years),
       start_year,
       end_year,
+      num_workers,
   )
   logging.info("Target: %s (Project: %s)", full_target_url, project)
 
@@ -417,49 +481,79 @@ def build_cpc_archive(
   total_days_processed = 0
   t0_total = time.time()
 
-  for y in tqdm.tqdm(years, desc="Processing CPC Years"):
-    t0_year = time.time()
-    logging.info("=== Processing Year %d ===", y)
+  if num_workers > 1 and len(years) > 1:
+    import multiprocessing as mp
 
-    # 1. Download NetCDF from NOAA PSL
-    nc_path = ensure_psl_cpc_netcdf(y, cache_dir=cache_dir)
-
-    # 2. Standardize to Caravan MultiMet Dataset
-    ds_year = process_cpc_netcdf_to_dataset(
-        nc_path,
-        target_start_date=t_start_filter,
-        target_end_date=t_end_filter,
-    )
-
-    if ds_year is None:
-      logging.warning("No data returned for year %d within date filters.", y)
-      continue
-
-    # 3. Write / Append to Zarr
-    write_batch_to_zarr(
-        ds_year,
-        full_target_url,
-        project=project,
-        is_initial_write=is_first_write,
-    )
-    is_first_write = False
-
-    num_days = len(ds_year["time"])
-    total_days_processed += num_days
-    logging.info(
-        "✓ Year %d completed (%d days) in %.2fs",
-        y,
-        num_days,
-        time.time() - t0_year,
-    )
-
-    # Optional cache cleanup
-    if cleanup_cache and os.path.exists(nc_path):
+    if sys.executable and os.path.exists(sys.executable):
       try:
-        os.remove(nc_path)
-        logging.info("Cleaned up cached file: %s", nc_path)
-      except OSError:
-        pass
+        mp_ctx = mp.get_context("spawn")
+      except Exception:
+        mp_ctx = mp.get_context("fork" if hasattr(os, "fork") else None)
+    else:
+      mp_ctx = mp.get_context("fork" if hasattr(os, "fork") else None)
+
+    logging.info("Spawning worker pool with %d processes...", num_workers)
+    with mp_ctx.Pool(
+        processes=num_workers,
+        initializer=_init_cpc_worker,
+        initargs=(cache_dir, t_start_filter, t_end_filter, cleanup_cache),
+    ) as pool:
+      iterator = pool.imap(_extract_single_year, years, chunksize=1)
+      for y, ds_year in tqdm.tqdm(
+          iterator, total=len(years), desc=f"Processing CPC ({num_workers} workers)"
+      ):
+        t0_write = time.time()
+        if ds_year is None:
+          logging.warning("No data returned for year %d within date filters.", y)
+          continue
+
+        write_batch_to_zarr(
+            ds_year,
+            full_target_url,
+            project=project,
+            is_initial_write=is_first_write,
+        )
+        is_first_write = False
+
+        num_days = len(ds_year["time"])
+        total_days_processed += num_days
+        logging.info(
+            "✓ Year %d completed (%d days) [write took %.2fs]",
+            y,
+            num_days,
+            time.time() - t0_write,
+        )
+  else:
+    logging.info(
+        "Running extraction sequentially (%d worker)...",
+        1 if num_workers <= 1 else num_workers,
+    )
+    _init_cpc_worker(cache_dir, t_start_filter, t_end_filter, cleanup_cache)
+    iterator = (_extract_single_year(y) for y in years)
+    for y, ds_year in tqdm.tqdm(
+        iterator, total=len(years), desc="Processing CPC (sequential)"
+    ):
+      t0_write = time.time()
+      if ds_year is None:
+        logging.warning("No data returned for year %d within date filters.", y)
+        continue
+
+      write_batch_to_zarr(
+          ds_year,
+          full_target_url,
+          project=project,
+          is_initial_write=is_first_write,
+      )
+      is_first_write = False
+
+      num_days = len(ds_year["time"])
+      total_days_processed += num_days
+      logging.info(
+          "✓ Year %d completed (%d days) [write took %.2fs]",
+          y,
+          num_days,
+          time.time() - t0_write,
+      )
 
   logging.info(
       "🎉 CPC Archive build complete! Processed %d total days across %d years in %.1fs.",
@@ -490,6 +584,11 @@ try:
       "Remove downloaded NetCDF files after writing to Zarr",
   )
   flags.DEFINE_boolean("overwrite", False, "Overwrite existing store")
+  flags.DEFINE_integer(
+      "num_workers",
+      min(32, os.cpu_count() or 4),
+      "Number of parallel extraction workers",
+  )
 except Exception:
   FLAGS = None
 
@@ -505,6 +604,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     cache_dir = FLAGS.cache_dir
     cleanup_cache = FLAGS.cleanup_cache
     overwrite = FLAGS.overwrite
+    num_workers = FLAGS.num_workers
   else:
     parser = argparse.ArgumentParser(
         description="Build unified CPC daily precipitation archive on GCS."
@@ -556,6 +656,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--overwrite", action="store_true", help="Overwrite existing store"
     )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=min(32, os.cpu_count() or 4),
+        help="Number of parallel extraction worker processes (default: up to 32 cores)",
+    )
 
     parsed_args, _ = parser.parse_known_args(
         argv[1:] if argv and len(argv) > 1 else None
@@ -569,6 +675,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     cache_dir = parsed_args.cache_dir
     cleanup_cache = parsed_args.cleanup_cache
     overwrite = parsed_args.overwrite
+    num_workers = parsed_args.num_workers
 
   build_cpc_archive(
       start_year=start_year,
@@ -580,6 +687,7 @@ def main(argv: Sequence[str] | None = None) -> None:
       cache_dir=cache_dir,
       cleanup_cache=cleanup_cache,
       overwrite=overwrite,
+      num_workers=num_workers,
   )
   sys.stdout.flush()
   sys.stderr.flush()

@@ -135,6 +135,36 @@ class TestBuildCPCArchive(unittest.TestCase):
     self.assertEqual(len(store2["time"]), 3)
     self.assertEqual(store2["cpc_precipitation"].shape, (3, 360, 720))
 
+  def test_parallel_build_cpc_archive(self):
+    # Create second year NetCDF in cache_dir so workers don't hit the network
+    nc_2021 = os.path.join(self.test_dir, "precip.2021.nc")
+    times_2021 = pd.date_range("2021-01-01", "2021-01-03", freq="D")
+    psl_lats = np.linspace(89.75, -89.75, 360, dtype=np.float32)
+    psl_lons = np.linspace(0.25, 359.75, 720, dtype=np.float32)
+    data_2021 = np.ones((len(times_2021), len(psl_lats), len(psl_lons)), dtype=np.float32)
+
+    ds_2021 = xr.Dataset(
+        data_vars={"precip": (["time", "lat", "lon"], data_2021)},
+        coords={"time": times_2021, "lat": psl_lats, "lon": psl_lons},
+    )
+    ds_2021.to_netcdf(nc_2021)
+
+    target_zarr = os.path.join(self.test_dir, "parallel_archive.zarr")
+    build_cpc_archive(
+        start_year=2020,
+        end_year=2021,
+        target_zarr=target_zarr,
+        cache_dir=self.test_dir,
+        num_workers=2,
+    )
+
+    store = xr.open_zarr(target_zarr, consolidated=True)
+    self.assertEqual(len(store["time"]), 6)
+    self.assertEqual(store["cpc_precipitation"].shape, (6, 360, 720))
+    # Times should be monotonically increasing
+    self.assertEqual(pd.Timestamp(store["time"].values[0]), pd.Timestamp("2020-01-01"))
+    self.assertEqual(pd.Timestamp(store["time"].values[-1]), pd.Timestamp("2021-01-03"))
+
 
 if __name__ == "__main__":
   unittest.main()
