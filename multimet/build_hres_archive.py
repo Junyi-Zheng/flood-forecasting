@@ -69,7 +69,7 @@ FLOOD_FORECASTING_NC_PATTERN = (
 ECMWF_OPEN_DATA_PREFIX = "ecmwf-open-data"
 
 WB2_CUTOFF_DATE = pd.Timestamp("2023-01-10")
-OPEN_DATA_START_DATE = pd.Timestamp("2023-07-12")
+OPEN_DATA_START_DATE = pd.Timestamp("2023-07-13")
 
 LEAD_STEPS_WB2 = [24, 48, 72, 96, 120, 144, 168, 192, 216, 240]
 
@@ -323,7 +323,10 @@ def _extract_single_date(
       if dt <= WB2_CUTOFF_DATE:
         date_data = _worker_wb2.extract_date(dt)
       elif dt < OPEN_DATA_START_DATE:
-        date_data = _worker_gap.extract_date(dt, _target_lat, _target_lon)
+        # 6-month gap between WeatherBench 2 (2023-01-10) and ECMWF Open Data (2023-07-13).
+        # Fill with NaN slice (to be backfilled from local CNS / internal storage).
+        date_data = None
+        break
       else:
         date_data = _worker_open_data.extract_date(dt, _target_lat, _target_lon)
       if date_data is not None:
