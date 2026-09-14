@@ -1,8 +1,8 @@
 seaborn
 geopandas
-sphinx>=3.2.1
-sphinx-rtd-theme>=0.5.0
-nbsphinx>=0.8.0
+sphinx
+sphinx-rtd-theme
+nbsphinx
 ipython
 numpy
 tensorboard
