@@ -511,12 +511,27 @@ class IMERGExtractor(BaseExtractor):
     dt = pd.to_datetime(dt)
     if self.source in ("gesdisc", "auto", "default", "public", "nasa"):
       nc_path = self.get_daily_file(dt)
-      return self.extract_day_from_nc4(
-          nc_path,
-          basins_gdf,
-          weights_matrix=matrix,
-          use_bounding_box=use_bounding_box,
-      )
+      try:
+        return self.extract_day_from_nc4(
+            nc_path,
+            basins_gdf,
+            weights_matrix=matrix,
+            use_bounding_box=use_bounding_box,
+        )
+      finally:
+        cache_dir = os.path.realpath(
+            os.environ.get("MULTIMET_IMERG_CACHE", "/tmp/multimet_imerg_cache")
+        )
+        real_nc_path = os.path.realpath(nc_path)
+        if (
+            real_nc_path.startswith(cache_dir)
+            and real_nc_path != cache_dir
+            and os.path.exists(real_nc_path)
+        ):
+          try:
+            os.remove(real_nc_path)
+          except OSError:
+            pass
     elif self.source in ("dynamical", "cloud"):
       ds = self.extract_for_basins_dynamical(
           basins_gdf,

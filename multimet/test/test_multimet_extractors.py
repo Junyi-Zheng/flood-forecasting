@@ -163,6 +163,35 @@ def test_imerg_daily_extraction(tmp_path, basins_gdf):
   assert np.allclose(vals, 8.5, atol=1e-3)
 
 
+
+def test_imerg_extract_day_cleans_cache(tmp_path, basins_gdf, monkeypatch):
+  """Tests that extract_day deletes the downloaded NetCDF file from cache after extraction."""
+  cache_dir = tmp_path / "cache"
+  cache_dir.mkdir()
+  monkeypatch.setenv("MULTIMET_IMERG_CACHE", str(cache_dir))
+
+  extractor = IMERGExtractor()
+  ds_mock = xr.Dataset(
+      data_vars={
+          "precipitation": (
+              ["lat", "lon"],
+              np.full((1800, 3600), 5.0, dtype=np.float32),
+          )
+      },
+      coords={
+          "lat": extractor.lats,
+          "lon": extractor.lons,
+      },
+  )
+  nc_path = cache_dir / "3B-DAY-E.MS.MRG.3IMERG.20200101-S000000-E235959.V07B.nc4"
+  ds_mock.to_netcdf(nc_path)
+  assert nc_path.exists()
+
+  monkeypatch.setattr(extractor, "get_daily_file", lambda dt: str(nc_path))
+
+  res = extractor.extract_day("2020-01-01", basins_gdf)
+  assert "imerg_precipitation" in res
+  assert not nc_path.exists()
 def test_hres_lead_differencing(tmp_path, basins_gdf):
   """Tests HRES accumulation differencing for precipitation."""
   extractor = HRESExtractor()
