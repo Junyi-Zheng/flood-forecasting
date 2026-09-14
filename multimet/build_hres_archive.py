@@ -297,6 +297,66 @@ class ECMWFOpenDataSource:
       return None
 
 
+_worker_wb2: Optional[WeatherBench2Source] = None
+_worker_gap: Optional[FloodForecastingGapSource] = None
+_worker_open_data: Optional[ECMWFOpenDataSource] = None
+_target_lat: Optional[np.ndarray] = None
+_target_lon: Optional[np.ndarray] = None
+
+
+def _init_worker(project: str) -> None:
+  global _worker_wb2, _worker_gap, _worker_open_data, _target_lat, _target_lon
+  _worker_wb2 = WeatherBench2Source()
+  _worker_gap = FloodForecastingGapSource(project=project)
+  _worker_open_data = ECMWFOpenDataSource()
+  _target_lat = _worker_wb2.latitudes
+  _target_lon = _worker_wb2.longitudes
+
+
+def _extract_single_date(
+    dt: pd.Timestamp,
+) -> Tuple[pd.Timestamp, Dict[str, np.ndarray]]:
+  global _worker_wb2, _worker_gap, _worker_open_data, _target_lat, _target_lon
+  date_data = None
+  for extract_attempt in range(3):
+    try:
+      if dt <= WB2_CUTOFF_DATE:
+        date_data = _worker_wb2.extract_date(dt)
+      elif dt < OPEN_DATA_START_DATE:
+        date_data = _worker_gap.extract_date(dt, _target_lat, _target_lon)
+      else:
+        date_data = _worker_open_data.extract_date(dt, _target_lat, _target_lon)
+      if date_data is not None:
+        break
+    except Exception as e:
+      logging.warning(
+          "Error extracting date %s (attempt %d/3): %s",
+          dt.strftime("%Y-%m-%d"),
+          extract_attempt + 1,
+          e,
+      )
+      import time
+
+      time.sleep(2)
+
+  if date_data is None:
+    logging.warning(
+        "No data found for date %s, inserting NaN slice",
+        dt.strftime("%Y-%m-%d"),
+    )
+    nan_grid = np.full(
+        (10, len(_target_lat), len(_target_lon)), np.nan, dtype=np.float32
+    )
+    date_data = {
+        "temperature_2m": nan_grid,
+        "surface_pressure": nan_grid.copy(),
+        "total_precipitation": nan_grid.copy(),
+        "surface_net_solar_radiation": nan_grid.copy(),
+        "surface_net_thermal_radiation": nan_grid.copy(),
+    }
+  return dt, date_data
+
+
 def write_batch_to_zarr(
     ds_batch: xr.Dataset,
     target_zarr_url: str,
@@ -305,16 +365,23 @@ def write_batch_to_zarr(
     max_retries: int = 5,
 ) -> None:
   """Writes or appends a batch of dates to the target Zarr store with retries."""
-  full_url = target_zarr_url if target_zarr_url.startswith("gs://") else f"gs://{target_zarr_url}"
-  clean_path = full_url.replace("gs://", "")
+  is_local = target_zarr_url.startswith("/") or target_zarr_url.startswith("./")
+  if is_local:
+    full_url = target_zarr_url
+    clean_path = target_zarr_url
+    mapper = target_zarr_url
+  else:
+    full_url = target_zarr_url if target_zarr_url.startswith("gs://") else f"gs://{target_zarr_url}"
+    clean_path = full_url.replace("gs://", "")
 
   for attempt in range(max_retries):
     try:
-      if gcsfs is not None:
-        fs = gcsfs.GCSFileSystem(project=project, requester_pays=project)
-        mapper = fs.get_mapper(clean_path)
-      else:
-        mapper = fsspec.get_mapper(full_url)
+      if not is_local:
+        if gcsfs is not None:
+          fs = gcsfs.GCSFileSystem(project=project, requester_pays=project)
+          mapper = fs.get_mapper(clean_path)
+        else:
+          mapper = fsspec.get_mapper(full_url)
 
       if is_initial_write:
         logging.info("Writing initial Zarr schema to %s...", full_url)
@@ -349,19 +416,36 @@ def build_hres_archive(
     project: str = DEFAULT_PROJECT,
     batch_size: int = 10,
     overwrite: bool = False,
+    num_workers: Optional[int] = None,
 ) -> None:
   """Main entry point to execute the HRES archive build."""
   logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-  full_target_url = target_zarr if target_zarr.startswith("gs://") else f"gs://{target_zarr}"
-  clean_target = full_target_url.replace("gs://", "")
+  is_local = target_zarr.startswith("/") or target_zarr.startswith("./")
+  if is_local:
+    full_target_url = target_zarr
+    clean_target = target_zarr
+  else:
+    full_target_url = target_zarr if target_zarr.startswith("gs://") else f"gs://{target_zarr}"
+    clean_target = full_target_url.replace("gs://", "")
+
+  if num_workers is None or num_workers <= 0:
+    num_workers = min(32, os.cpu_count() or 4)
 
   dates = pd.date_range(start_date, end_date, freq="1D")
   logging.info("Building HRES archive for %d dates: %s to %s", len(dates), start_date, end_date)
-  logging.info("Target: %s (Project: %s)", full_target_url, project)
+  logging.info(
+      "Target: %s (Project: %s, Workers: %d, Batch Size: %d)",
+      full_target_url,
+      project,
+      num_workers,
+      batch_size,
+  )
 
   fs = None
   store_exists = False
-  if gcsfs is not None:
+  if is_local:
+    store_exists = os.path.exists(os.path.join(clean_target, ".zmetadata")) or os.path.exists(os.path.join(clean_target, "zarr.json"))
+  elif gcsfs is not None:
     fs = gcsfs.GCSFileSystem(project=project, requester_pays=project)
     store_exists = fs.exists(f"{clean_target}/.zmetadata") or fs.exists(f"{clean_target}/zarr.json")
   else:
@@ -373,13 +457,22 @@ def build_hres_archive(
 
   if store_exists and overwrite:
     logging.info("Overwriting existing store at %s...", full_target_url)
-    if fs is not None and fs.exists(clean_target):
+    if is_local:
+      import shutil
+      if os.path.exists(clean_target):
+        shutil.rmtree(clean_target)
+    elif fs is not None and fs.exists(clean_target):
       fs.rm(clean_target, recursive=True)
     store_exists = False
 
   if store_exists and not overwrite:
     try:
-      mapper = fs.get_mapper(clean_target) if fs is not None else fsspec.get_mapper(full_target_url)
+      if is_local:
+        mapper = clean_target
+      elif fs is not None:
+        mapper = fs.get_mapper(clean_target)
+      else:
+        mapper = fsspec.get_mapper(full_target_url)
       existing_ds = xr.open_zarr(mapper)
       max_existing_time = pd.Timestamp(existing_ds["time"].values.max())
       logging.info(
@@ -403,13 +496,6 @@ def build_hres_archive(
 
   is_first_write = not store_exists or overwrite
 
-  wb2 = WeatherBench2Source()
-  gap = FloodForecastingGapSource(project=project)
-  open_data = ECMWFOpenDataSource()
-
-  target_lat = wb2.latitudes
-  target_lon = wb2.longitudes
-
   batch_dates = []
   batch_data = {
       "temperature_2m": [],
@@ -419,58 +505,86 @@ def build_hres_archive(
       "surface_net_thermal_radiation": [],
   }
 
-  for dt in tqdm.tqdm(dates, desc="Processing HRES Dates"):
-    date_data = None
-    for extract_attempt in range(3):
-      try:
-        if dt <= WB2_CUTOFF_DATE:
-          date_data = wb2.extract_date(dt)
-        elif dt < OPEN_DATA_START_DATE:
-          date_data = gap.extract_date(dt, target_lat, target_lon)
-        else:
-          date_data = open_data.extract_date(dt, target_lat, target_lon)
-        if date_data is not None:
-          break
-      except Exception as e:
-        logging.warning("Error extracting date %s (attempt %d/3): %s", dt.strftime("%Y-%m-%d"), extract_attempt + 1, e)
-        import time
-        time.sleep(2)
+  target_lat = np.linspace(-90.0, 90.0, 721, dtype=np.float32)
+  target_lon = np.linspace(0.0, 359.75, 1440, dtype=np.float32)
 
-    if date_data is None:
-      logging.warning("No data found for date %s, inserting NaN slice", dt.strftime("%Y-%m-%d"))
-      nan_grid = np.full((10, len(target_lat), len(target_lon)), np.nan, dtype=np.float32)
-      date_data = {v: nan_grid for v in batch_data.keys()}
+  if num_workers > 1:
+    import multiprocessing as mp
+    mp_ctx = mp.get_context("spawn")
 
-    batch_dates.append(dt)
-    for k in batch_data.keys():
-      batch_data[k].append(date_data[k])
+    logging.info("Spawning worker pool with %d processes...", num_workers)
+    with mp_ctx.Pool(processes=num_workers, initializer=_init_worker, initargs=(project,)) as pool:
+      iterator = pool.imap(_extract_single_date, dates, chunksize=1)
+      for dt, date_data in tqdm.tqdm(
+          iterator, total=len(dates), desc=f"Processing HRES ({num_workers} workers)"
+      ):
+        batch_dates.append(dt)
+        for k in batch_data.keys():
+          batch_data[k].append(date_data[k])
 
-    if len(batch_dates) >= batch_size:
-      ds_batch = xr.Dataset(
-          data_vars={
-              k: (["time", "lead_time", "latitude", "longitude"], np.stack(v, axis=0))
-              for k, v in batch_data.items()
-          },
-          coords={
-              "time": batch_dates,
-              "lead_time": np.arange(1, 11, dtype=np.int32),
-              "latitude": target_lat,
-              "longitude": target_lon,
-          },
-          attrs={
-              "title": "Open-MultiMet ECMWF HRES Daily Surface Forecast Archive",
-              "spatial_resolution": "0.25 degree",
-              "description": "Daily-aggregated surface forecast variables (lead days 1..10) from ECMWF IFS HRES",
-              "license": "CC-BY-4.0",
-              "institution": "ECMWF / Open-MultiMet",
-          },
-      )
-      write_batch_to_zarr(
-          ds_batch, full_target_url, project=project, is_initial_write=is_first_write
-      )
-      is_first_write = False
-      batch_dates = []
-      batch_data = {k: [] for k in batch_data.keys()}
+        if len(batch_dates) >= batch_size:
+          ds_batch = xr.Dataset(
+              data_vars={
+                  k: (["time", "lead_time", "latitude", "longitude"], np.stack(v, axis=0))
+                  for k, v in batch_data.items()
+              },
+              coords={
+                  "time": batch_dates,
+                  "lead_time": np.arange(1, 11, dtype=np.int32),
+                  "latitude": target_lat,
+                  "longitude": target_lon,
+              },
+              attrs={
+                  "title": "Open-MultiMet ECMWF HRES Daily Surface Forecast Archive",
+                  "spatial_resolution": "0.25 degree",
+                  "description": "Daily-aggregated surface forecast variables (lead days 1..10) from ECMWF IFS HRES",
+                  "license": "CC-BY-4.0",
+                  "institution": "ECMWF / Open-MultiMet",
+              },
+          )
+          write_batch_to_zarr(
+              ds_batch, full_target_url, project=project, is_initial_write=is_first_write
+          )
+          is_first_write = False
+          batch_dates = []
+          batch_data = {k: [] for k in batch_data.keys()}
+  else:
+    logging.info("Running extraction sequentially (1 worker)...")
+    _init_worker(project)
+    target_lat = _target_lat
+    target_lon = _target_lon
+    for dt in tqdm.tqdm(dates, desc="Processing HRES (sequential)"):
+      dt, date_data = _extract_single_date(dt)
+      batch_dates.append(dt)
+      for k in batch_data.keys():
+        batch_data[k].append(date_data[k])
+
+      if len(batch_dates) >= batch_size:
+        ds_batch = xr.Dataset(
+            data_vars={
+                k: (["time", "lead_time", "latitude", "longitude"], np.stack(v, axis=0))
+                for k, v in batch_data.items()
+            },
+            coords={
+                "time": batch_dates,
+                "lead_time": np.arange(1, 11, dtype=np.int32),
+                "latitude": target_lat,
+                "longitude": target_lon,
+            },
+            attrs={
+                "title": "Open-MultiMet ECMWF HRES Daily Surface Forecast Archive",
+                "spatial_resolution": "0.25 degree",
+                "description": "Daily-aggregated surface forecast variables (lead days 1..10) from ECMWF IFS HRES",
+                "license": "CC-BY-4.0",
+                "institution": "ECMWF / Open-MultiMet",
+            },
+        )
+        write_batch_to_zarr(
+            ds_batch, full_target_url, project=project, is_initial_write=is_first_write
+        )
+        is_first_write = False
+        batch_dates = []
+        batch_data = {k: [] for k in batch_data.keys()}
 
   if batch_dates:
     ds_batch = xr.Dataset(
@@ -508,6 +622,11 @@ try:
   flags.DEFINE_string("project", DEFAULT_PROJECT, "GCP project ID")
   flags.DEFINE_integer("batch_size", 10, "Days per write batch")
   flags.DEFINE_boolean("overwrite", False, "Overwrite existing store")
+  flags.DEFINE_integer(
+      "num_workers",
+      min(32, os.cpu_count() or 4),
+      "Number of parallel extraction workers",
+  )
 except Exception:
   FLAGS = None
 
@@ -520,6 +639,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     project = FLAGS.project
     batch_size = FLAGS.batch_size
     overwrite = FLAGS.overwrite
+    num_workers = FLAGS.num_workers
   else:
     parser = argparse.ArgumentParser(description="Build unified HRES daily surface archive on GCS.")
     parser.add_argument("--start_date", type=str, default="2016-01-01", help="Start date (YYYY-MM-DD)")
@@ -528,6 +648,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--project", type=str, default=DEFAULT_PROJECT, help="GCP project ID")
     parser.add_argument("--batch_size", type=int, default=10, help="Days per write batch")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing store")
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=min(32, os.cpu_count() or 4),
+        help="Number of parallel extraction worker processes (default: up to 32 cores)",
+    )
     parsed_args, _ = parser.parse_known_args(argv[1:] if argv and len(argv) > 1 else None)
     start_date = parsed_args.start_date
     end_date = parsed_args.end_date
@@ -535,6 +661,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     project = parsed_args.project
     batch_size = parsed_args.batch_size
     overwrite = parsed_args.overwrite
+    num_workers = parsed_args.num_workers
 
   build_hres_archive(
       start_date=start_date,
@@ -543,6 +670,7 @@ def main(argv: Sequence[str] | None = None) -> None:
       project=project,
       batch_size=batch_size,
       overwrite=overwrite,
+      num_workers=num_workers,
   )
 
 
