@@ -54,6 +54,7 @@ setup(
             'schedule-runs=googlehydrology.run_scheduler:_main',
             'run=googlehydrology.run:_main',
             'extract-multimet=multimet.runner:main',
+            'build-hres-archive=multimet.build_hres_archive:main',
         ]
     },
     python_requires='>=3.12',
