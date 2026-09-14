@@ -246,7 +246,7 @@ def write_batch_to_zarr(
     try:
       if is_gcs:
         if gcsfs is not None:
-          fs = gcsfs.GCSFileSystem(project=project, requester_pays=project)
+          fs = gcsfs.GCSFileSystem(project=project)
           mapper = fs.get_mapper(clean_path)
         else:
           mapper = fsspec.get_mapper(full_url)
@@ -404,7 +404,7 @@ def build_cpc_archive(
   store_exists = False
   if is_gcs:
     if gcsfs is not None:
-      fs = gcsfs.GCSFileSystem(project=project, requester_pays=project)
+      fs = gcsfs.GCSFileSystem(project=project)
       store_exists = fs.exists(f"{clean_target}/.zmetadata") or fs.exists(
           f"{clean_target}/zarr.json"
       )
