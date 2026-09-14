@@ -301,6 +301,9 @@ DEFAULT_STORAGE_PATHS: Mapping[Product, Mapping[str, str]] = {
         "ee_image_collection": "ECMWF/ERA5_LAND/HOURLY",
     },
     Product.CPC: {
+        "unified_zarr": (
+            "gs://open-multimet/data/cpc/daily_surface.zarr"
+        ),
         "psl_netcdf": (
             "https://downloads.psl.noaa.gov/Datasets/cpc_global_precip/"
         ),
@@ -330,12 +333,16 @@ DEFAULT_STORAGE_PATHS: Mapping[Product, Mapping[str, str]] = {
         ),
     },
     Product.HRES: {
+        "unified_zarr": (
+            "gs://open-multimet/data/hres/daily_surface.zarr"
+        ),
         "wb2_zarr": (
             "gs://weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr"
         ),
         # ECMWF Open Data public archive
         "ecmwf_open_data": "https://data.ecmwf.int/forecasts/",
     },
+
     Product.GRAPHCAST: {
         "wb2_zarr": (
             "gs://weatherbench2/datasets/graphcast/2020/date_range_2019-11-16_2021-02-01_12_hours.zarr"
