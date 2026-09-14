@@ -116,7 +116,7 @@ class TestBuildCPCArchive(unittest.TestCase):
     )
 
     # Check store exists and has 1 day
-    store1 = xr.open_zarr(target_zarr, consolidated=True)
+    store1 = xr.open_zarr(target_zarr, consolidated=False)
     self.assertEqual(len(store1["time"]), 1)
     self.assertEqual(store1["cpc_precipitation"].shape, (1, 360, 720))
 
@@ -131,7 +131,7 @@ class TestBuildCPCArchive(unittest.TestCase):
     )
 
     # Check store has 3 days
-    store2 = xr.open_zarr(target_zarr, consolidated=True)
+    store2 = xr.open_zarr(target_zarr, consolidated=False)
     self.assertEqual(len(store2["time"]), 3)
     self.assertEqual(store2["cpc_precipitation"].shape, (3, 360, 720))
 
@@ -158,7 +158,7 @@ class TestBuildCPCArchive(unittest.TestCase):
         num_workers=2,
     )
 
-    store = xr.open_zarr(target_zarr, consolidated=True)
+    store = xr.open_zarr(target_zarr, consolidated=False)
     self.assertEqual(len(store["time"]), 6)
     self.assertEqual(store["cpc_precipitation"].shape, (6, 360, 720))
     # Times should be monotonically increasing
