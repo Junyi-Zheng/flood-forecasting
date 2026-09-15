@@ -332,6 +332,9 @@ def _extract_single_date(
       if date_data is not None:
         break
     except Exception as e:
+      if "No module named 'eccodes'" in str(e) or (isinstance(e, ModuleNotFoundError) and "eccodes" in str(e)):
+        logging.error("FATAL: 'eccodes' is not installed in this python environment! Please install python-eccodes/eccodes.")
+        raise
       logging.warning(
           "Error extracting date %s (attempt %d/3): %s",
           dt.strftime("%Y-%m-%d"),
@@ -413,6 +416,71 @@ def write_batch_to_zarr(
       time.sleep(wait_secs)
 
 
+def write_batch_in_place(
+    ds_batch: xr.Dataset,
+    target_zarr_url: str,
+    project: str = DEFAULT_PROJECT,
+    date_to_idx: Optional[Dict[str, int]] = None,
+    max_retries: int = 5,
+) -> None:
+  """Writes a batch of dates directly in-place into existing Zarr array slices."""
+  is_local = target_zarr_url.startswith("/") or target_zarr_url.startswith("./")
+  if is_local:
+    mapper = target_zarr_url
+  elif gcsfs is not None:
+    fs = gcsfs.GCSFileSystem(project=project, requester_pays=project)
+    clean_path = target_zarr_url.replace("gs://", "")
+    mapper = fs.get_mapper(clean_path)
+  else:
+    mapper = fsspec.get_mapper(target_zarr_url)
+
+  root = zarr.open_group(mapper, mode="r+")
+
+  if date_to_idx is None:
+    time_raw = root["time"][:]
+    time_pd = pd.to_datetime(time_raw)
+    date_to_idx = {t.strftime("%Y-%m-%d"): i for i, t in enumerate(time_pd)}
+
+  batch_dates = pd.to_datetime(ds_batch["time"].values)
+  indices = [date_to_idx.get(t.strftime("%Y-%m-%d")) for t in batch_dates]
+
+  if any(idx is None for idx in indices):
+    missing = [t.strftime("%Y-%m-%d") for t, idx in zip(batch_dates, indices) if idx is None]
+    raise ValueError(f"Cannot write in-place: dates {missing} not in target Zarr time coordinate.")
+
+  is_contiguous = indices[-1] - indices[0] == len(indices) - 1 and indices == list(range(indices[0], indices[-1] + 1))
+
+  for attempt in range(max_retries):
+    try:
+      logging.info(
+          "Writing %d dates in-place to Zarr (time indices %d to %d)...",
+          len(indices),
+          indices[0],
+          indices[-1],
+      )
+      for var in ds_batch.data_vars:
+        vals = ds_batch[var].values
+        if is_contiguous:
+          root[var][indices[0] : indices[-1] + 1] = vals
+        else:
+          for i, date_idx in enumerate(indices):
+            root[var][date_idx] = vals[i]
+      return
+    except Exception as e:
+      wait_secs = 5 * (2 ** attempt)
+      logging.warning(
+          "Error writing in-place batch to Zarr (attempt %d/%d): %s. Retrying in %ds...",
+          attempt + 1,
+          max_retries,
+          e,
+          wait_secs,
+      )
+      if attempt == max_retries - 1:
+        raise
+      import time
+      time.sleep(wait_secs)
+
+
 def build_hres_archive(
     start_date: str,
     end_date: str,
@@ -420,6 +488,7 @@ def build_hres_archive(
     project: str = DEFAULT_PROJECT,
     batch_size: int = 10,
     overwrite: bool = False,
+    in_place: bool = False,
     num_workers: Optional[int] = None,
 ) -> None:
   """Main entry point to execute the HRES archive build."""
@@ -438,11 +507,12 @@ def build_hres_archive(
   dates = pd.date_range(start_date, end_date, freq="1D")
   logging.info("Building HRES archive for %d dates: %s to %s", len(dates), start_date, end_date)
   logging.info(
-      "Target: %s (Project: %s, Workers: %d, Batch Size: %d)",
+      "Target: %s (Project: %s, Workers: %d, Batch Size: %d, In-Place: %s)",
       full_target_url,
       project,
       num_workers,
       batch_size,
+      in_place,
   )
 
   fs = None
@@ -463,7 +533,27 @@ def build_hres_archive(
     except Exception:
       store_exists = False
 
-  if store_exists and overwrite:
+  date_to_idx = None
+  if in_place:
+    if not store_exists:
+      raise ValueError(f"Cannot run --in_place: target store {full_target_url} does not exist.")
+    if is_local:
+      mapper = clean_target
+    elif fs is not None:
+      mapper = fs.get_mapper(clean_target)
+    else:
+      mapper = fsspec.get_mapper(full_target_url)
+    root = zarr.open_group(mapper, mode="r+")
+    time_raw = root["time"][:]
+    time_pd = pd.to_datetime(time_raw)
+    date_to_idx = {t.strftime("%Y-%m-%d"): i for i, t in enumerate(time_pd)}
+    logging.info(
+        "In-place update mode enabled across %d dates (%s to %s).",
+        len(dates),
+        start_date,
+        end_date,
+    )
+  elif store_exists and overwrite:
     logging.info("Overwriting existing store at %s...", full_target_url)
     if is_local:
       import shutil
@@ -473,7 +563,7 @@ def build_hres_archive(
       fs.rm(clean_target, recursive=True)
     store_exists = False
 
-  if store_exists and not overwrite:
+  elif store_exists and not overwrite:
     try:
       if is_local:
         mapper = clean_target
@@ -550,10 +640,15 @@ def build_hres_archive(
                   "institution": "ECMWF / Open-MultiMet",
               },
           )
-          write_batch_to_zarr(
-              ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
-          )
-          is_first_write = False
+          if in_place:
+            write_batch_in_place(
+                ds_batch, full_target_url, project=project, date_to_idx=date_to_idx
+            )
+          else:
+            write_batch_to_zarr(
+                ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
+            )
+            is_first_write = False
           batch_dates = []
           batch_data = {k: [] for k in batch_data.keys()}
   else:
@@ -587,10 +682,15 @@ def build_hres_archive(
                 "institution": "ECMWF / Open-MultiMet",
             },
         )
-        write_batch_to_zarr(
-            ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
-        )
-        is_first_write = False
+        if in_place:
+          write_batch_in_place(
+              ds_batch, full_target_url, project=project, date_to_idx=date_to_idx
+          )
+        else:
+          write_batch_to_zarr(
+              ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
+          )
+          is_first_write = False
         batch_dates = []
         batch_data = {k: [] for k in batch_data.keys()}
 
@@ -614,9 +714,14 @@ def build_hres_archive(
             "institution": "ECMWF / Open-MultiMet",
         },
     )
-    write_batch_to_zarr(
-        ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
-    )
+    if in_place:
+      write_batch_in_place(
+          ds_batch, full_target_url, project=project, date_to_idx=date_to_idx
+      )
+    else:
+      write_batch_to_zarr(
+          ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
+      )
 
   logging.info("HRES archive build complete for %s to %s!", start_date, end_date)
 
@@ -630,6 +735,7 @@ try:
   flags.DEFINE_string("project", DEFAULT_PROJECT, "GCP project ID")
   flags.DEFINE_integer("batch_size", 10, "Days per write batch")
   flags.DEFINE_boolean("overwrite", False, "Overwrite existing store")
+  flags.DEFINE_boolean("in_place", False, "Update existing dates in-place in target Zarr store")
   flags.DEFINE_integer(
       "num_workers",
       min(32, os.cpu_count() or 4),
@@ -647,6 +753,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     project = FLAGS.project
     batch_size = FLAGS.batch_size
     overwrite = FLAGS.overwrite
+    in_place = getattr(FLAGS, "in_place", False)
     num_workers = FLAGS.num_workers
   else:
     parser = argparse.ArgumentParser(description="Build unified HRES daily surface archive on GCS.")
@@ -656,6 +763,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--project", type=str, default=DEFAULT_PROJECT, help="GCP project ID")
     parser.add_argument("--batch_size", type=int, default=10, help="Days per write batch")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing store")
+    parser.add_argument("--in_place", action="store_true", help="Update existing dates in-place in target Zarr store")
     parser.add_argument(
         "--num_workers",
         type=int,
@@ -669,6 +777,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     project = parsed_args.project
     batch_size = parsed_args.batch_size
     overwrite = parsed_args.overwrite
+    in_place = parsed_args.in_place
     num_workers = parsed_args.num_workers
 
   build_hres_archive(
@@ -678,6 +787,7 @@ def main(argv: Sequence[str] | None = None) -> None:
       project=project,
       batch_size=batch_size,
       overwrite=overwrite,
+      in_place=in_place,
       num_workers=num_workers,
   )
 
