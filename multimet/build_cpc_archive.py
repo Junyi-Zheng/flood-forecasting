@@ -299,6 +299,7 @@ _worker_cache_dir: str = DEFAULT_CACHE_DIR
 _worker_start_date: Optional[pd.Timestamp] = None
 _worker_end_date: Optional[pd.Timestamp] = None
 _worker_cleanup_cache: bool = False
+_worker_year_starts: dict[int, pd.Timestamp] = {}
 
 
 def _init_cpc_worker(
@@ -306,17 +307,19 @@ def _init_cpc_worker(
     start_date: Optional[pd.Timestamp],
     end_date: Optional[pd.Timestamp],
     cleanup_cache: bool,
+    year_starts: Optional[dict[int, pd.Timestamp]] = None,
 ) -> None:
-  global _worker_cache_dir, _worker_start_date, _worker_end_date, _worker_cleanup_cache
+  global _worker_cache_dir, _worker_start_date, _worker_end_date, _worker_cleanup_cache, _worker_year_starts
   _worker_cache_dir = cache_dir
   _worker_start_date = start_date
   _worker_end_date = end_date
   _worker_cleanup_cache = cleanup_cache
+  _worker_year_starts = year_starts or {}
 
 
 def _extract_single_year(year: int) -> Tuple[int, Optional[xr.Dataset]]:
   """Worker task to download and transform a single year of CPC precipitation."""
-  global _worker_cache_dir, _worker_start_date, _worker_end_date, _worker_cleanup_cache
+  global _worker_cache_dir, _worker_start_date, _worker_end_date, _worker_cleanup_cache, _worker_year_starts
   t0 = time.time()
   logging.info(
       "Worker [%d] downloading CPC PSL NetCDF for year %d...",
@@ -325,14 +328,16 @@ def _extract_single_year(year: int) -> Tuple[int, Optional[xr.Dataset]]:
   )
   nc_path = ensure_psl_cpc_netcdf(year, cache_dir=_worker_cache_dir)
 
+  y_start = _worker_year_starts.get(year, _worker_start_date)
   logging.info(
-      "Worker [%d] standardizing CPC dataset for year %d...",
+      "Worker [%d] standardizing CPC dataset for year %d (start_date: %s)...",
       os.getpid(),
       year,
+      y_start.strftime("%Y-%m-%d") if y_start else "None",
   )
   ds_year = process_cpc_netcdf_to_dataset(
       nc_path,
-      target_start_date=_worker_start_date,
+      target_start_date=y_start,
       target_end_date=_worker_end_date,
   )
 
@@ -432,6 +437,7 @@ def build_cpc_archive(
 
   is_first_write = not store_exists or overwrite
   processed_years = set()
+  year_starts: dict[int, pd.Timestamp] = {}
   has_consolidated = False
 
   if store_exists and not overwrite:
@@ -460,13 +466,26 @@ def build_cpc_archive(
           has_consolidated,
       )
 
+      year_starts = {}
       # Determine which years are already fully written
       for y in years:
         y_dates = existing_times[existing_times.year == y]
-        # Full year check (365 or 366 days for past years)
         expected_days = 366 if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) else 365
-        if y < datetime.date.today().year and len(y_dates) >= expected_days:
+        if len(y_dates) >= expected_days:
           processed_years.add(y)
+        elif len(y_dates) > 0:
+          next_date = pd.Timestamp(y_dates.max()) + pd.Timedelta(days=1)
+          if t_start_filter is not None:
+            year_starts[y] = max(t_start_filter, next_date)
+          else:
+            year_starts[y] = next_date
+          logging.info(
+              "Year %d partially present (%d dates up to %s). Resuming from %s.",
+              y,
+              len(y_dates),
+              y_dates.max().strftime("%Y-%m-%d"),
+              year_starts[y].strftime("%Y-%m-%d"),
+          )
 
       # Filter remaining years
       remaining_years = [y for y in years if y not in processed_years]
@@ -506,7 +525,7 @@ def build_cpc_archive(
     with mp_ctx.Pool(
         processes=num_workers,
         initializer=_init_cpc_worker,
-        initargs=(cache_dir, t_start_filter, t_end_filter, cleanup_cache),
+        initargs=(cache_dir, t_start_filter, t_end_filter, cleanup_cache, year_starts),
     ) as pool:
       iterator = pool.imap(_extract_single_year, years, chunksize=1)
       for y, ds_year in tqdm.tqdm(
@@ -539,7 +558,7 @@ def build_cpc_archive(
         "Running extraction sequentially (%d worker)...",
         1 if num_workers <= 1 else num_workers,
     )
-    _init_cpc_worker(cache_dir, t_start_filter, t_end_filter, cleanup_cache)
+    _init_cpc_worker(cache_dir, t_start_filter, t_end_filter, cleanup_cache, year_starts)
     iterator = (_extract_single_year(y) for y in years)
     for y, ds_year in tqdm.tqdm(
         iterator, total=len(years), desc="Processing CPC (sequential)"
@@ -574,6 +593,13 @@ def build_cpc_archive(
       time.time() - t0_total,
   )
   logging.info("Destination store: %s", full_target_url)
+
+  if cleanup_cache and os.path.exists(cache_dir):
+    try:
+      shutil.rmtree(cache_dir)
+      logging.info("Cleaned up cache directory: %s", cache_dir)
+    except OSError:
+      pass
 
 
 try:
