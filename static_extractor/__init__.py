@@ -19,6 +19,10 @@ and anthropogenic static attributes for arbitrary watershed polygons following
 the official Caravan and HydroATLAS Level 12 aggregation methodology.
 """
 
+from static_extractor.batch_runner import (
+    discover_datasets,
+    run_batch_extraction,
+)
 from static_extractor.climate import (
     ERA5ClimateLoader,
     ERA5GriddedExtractor,
@@ -54,6 +58,8 @@ from static_extractor.gcs import (
 
 __all__ = [
     "StaticAttributesExtractor",
+    "discover_datasets",
+    "run_batch_extraction",
     "ERA5ClimateLoader",
     "ERA5GriddedExtractor",
     "compute_caravan_climate_metrics",

@@ -91,6 +91,7 @@ extract-caravan-static \
 ### CLI Arguments
 - `--input`, `-i`: Path to vector polygon file (`.geojson`, `.shp`, `.gpkg`).
 - `--output`, `-o`: Path to output CSV file for extracted Caravan attributes.
+- `--workers`, `-w`: Number of parallel worker processes to use (default: 1).
 - `--id-column`: Name of the property column containing the catchment/gauge identifier (defaults to auto-detection: `gauge_id`, `catchment_id`, `id`, `basin_id`).
 - `--era5-source`: Choice of ERA5 climate attribute calculation method (`hybas` or `gridded`, default: `hybas`):
   - `hybas`: Fast area-weighted aggregation of precomputed HydroSHEDS Level 12 sub-basin statistics (~20 ms/basin).
@@ -99,6 +100,44 @@ extract-caravan-static \
 - `--min-overlap-threshold`: Minimum sub-basin overlap area in $\text{km}^2$ to filter boundary slivers (default `0.0`).
 - `--gdb-path`, `-g`: Optional override path to local `BasinATLAS_v10.gdb` (defaults to runtime cache).
 - `--era5-cache-dir`: Optional override directory for ERA5 climate files (defaults to runtime cache).
+
+---
+
+## 🚀 Multi-Dataset Batch Runner (`extract-caravan-batch`)
+
+For processing multiple Caravan datasets in one command, the package provides `extract-caravan-batch`. It accepts parent directories, directory lists, or direct GCS URIs, auto-discovers watershed shapefiles, supports `--workers` parallelization, and outputs separate CSVs per dataset plus an optional combined CSV:
+
+```bash
+# 1. Run all datasets within a parent directory (e.g. caravan/ containing camels/, hysets/, etc.)
+extract-caravan-batch \
+    --parent-dir /path/to/caravan_shapefiles/caravan/ \
+    --output-dir /path/to/extracted_csvs/ \
+    --workers 32 \
+    --combine
+
+# 2. Run directly from Google Cloud Storage parent URI
+extract-caravan-batch \
+    --parent-dir gs://open-multimet/data/caravan_shapefiles/caravan/ \
+    --output-dir /path/to/extracted_csvs/ \
+    --workers 32 \
+    --combine
+
+# 3. Run for an explicit list of dataset directories
+extract-caravan-batch \
+    --input-dirs /data/shapes/camels /data/shapes/camelsaus /data/shapes/lamah \
+    --output-dir /path/to/extracted_csvs/ \
+    --workers 32
+```
+
+### Batch Runner Arguments
+- `--parent-dir`, `-p`: Parent directory containing dataset subdirectories (local path or `gs://...`). Can be passed multiple times.
+- `--input-dirs`, `-d`: Explicit list of dataset directories.
+- `--input-files`, `-f`: Explicit list of vector files (`.shp`, `.geojson`, `.gpkg`).
+- `--output-dir`, `-o`: Output directory for generated CSV files (`attributes_caravan_<dataset>.csv`).
+- `--workers`, `-w`: Number of parallel worker processes.
+- `--era5-source`: `hybas` (default) or `gridded`.
+- `--combine`: Generates an aggregated `attributes_caravan_combined.csv` merging all datasets.
+- `--no-resume`: Disables resume (by default, already completed datasets are skipped).
 
 ---
 

@@ -168,11 +168,12 @@ extract-caravan-static \
     --input /path/to/watershed_polygons.geojson \
     --output /path/to/extracted_caravan_attributes.csv
 
-# Or recalculate climate indices directly from archived daily gridded ERA5 Zarr
-extract-caravan-static \
-    --input /path/to/watershed_polygons.geojson \
-    --output /path/to/extracted_caravan_attributes.csv \
-    --era5-source gridded
+# Multi-dataset batch runner (processes parent directories or directory lists)
+extract-caravan-batch \
+    --parent-dir gs://open-multimet/data/caravan_shapefiles/caravan/ \
+    --output-dir /path/to/extracted_csvs/ \
+    --workers 32 \
+    --combine
 ```
 
 ### **Quick Python API**

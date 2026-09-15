@@ -235,3 +235,24 @@ def test_era5_gridded_extractor_synthetic(tmp_path):
   assert metrics["aridity_FAO_PM"] == 0.5
   assert metrics["frac_snow"] == 0.0
 
+
+def test_batch_runner_discovery(tmp_path):
+  """Tests discover_datasets in batch_runner across multiple dataset folders."""
+  from static_extractor.batch_runner import discover_datasets
+  
+  parent = tmp_path / "caravan_root"
+  ds1 = parent / "camels"
+  ds2 = parent / "hysets"
+  ds1.mkdir(parents=True)
+  ds2.mkdir(parents=True)
+  
+  (ds1 / "camels_basin_shapes.shp").touch()
+  (ds2 / "hysets.geojson").touch()
+  
+  datasets = discover_datasets(parent_dirs=[str(parent)])
+  assert "camels" in datasets
+  assert "hysets" in datasets
+  assert datasets["camels"].name == "camels_basin_shapes.shp"
+  assert datasets["hysets"].name == "hysets.geojson"
+
+
