@@ -415,9 +415,8 @@ class ERA5ClimateLoader:
       except Exception:
         pass
 
-    target_id_set = set(hybas_ids)
     for c in needed_continents:
-      self.ensure_continent(c, target_ids=target_id_set)
+      self.ensure_continent(c)
 
     keys = [
         "p_mean",
