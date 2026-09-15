@@ -77,7 +77,8 @@ def parse_args(args=None):
   parser.add_argument(
       "--auto-download",
       action="store_true",
-      help="Automatically download HydroATLAS GDB from Google Cloud Storage if missing.",
+      default=True,
+      help="Automatically download data from canonical Google Cloud Storage if not staged locally.",
   )
   return parser.parse_args(args)
 

@@ -33,7 +33,6 @@ import numpy as np
 import pandas as pd
 
 from static_extractor.config import (
-    CNS_ERA5_CLIMATE_BASE,
     CONTINENT_MAP,
     GCS_ERA5_CLIMATE_URI,
     get_default_era5_cache_dir,
@@ -313,57 +312,51 @@ class ERA5ClimateLoader:
     self.records: Dict[int, Dict[str, Any]] = {}
 
   def _download_from_gcs(self, continent_code: str, target_file: Path) -> bool:
-    """Attempts to download continent file from GCS."""
+    """Attempts to download continent file from canonical GCS bucket."""
     gcs_src = f"{GCS_ERA5_CLIMATE_URI}/{continent_code}_climate_indices.txt"
     try:
       import gcsfs
 
-      fs = gcsfs.GCSFileSystem(token="anon")
+      try:
+        fs = gcsfs.GCSFileSystem()
+      except Exception:
+        fs = gcsfs.GCSFileSystem(token="anon")
       remote_path = gcs_src.replace("gs://", "")
       if fs.exists(remote_path):
+        target_file.parent.mkdir(parents=True, exist_ok=True)
         fs.get(remote_path, str(target_file))
-        return True
-    except Exception:
-      pass
+        if target_file.exists() and target_file.stat().st_size > 0:
+          return True
+    except Exception as e:
+      logger.debug("gcsfs download attempt failed: %s", e)
 
     if shutil.which("gcloud"):
       try:
         cmd = ["gcloud", "storage", "cp", gcs_src, str(target_file)]
-        res = subprocess.run(cmd, capture_output=True, timeout=30)
-        if res.returncode == 0 and target_file.exists():
+        res = subprocess.run(cmd, capture_output=True, timeout=60)
+        if res.returncode == 0 and target_file.exists() and target_file.stat().st_size > 0:
           return True
-      except Exception:
-        pass
+      except Exception as e:
+        logger.debug("gcloud storage download attempt failed: %s", e)
     return False
-
-  def _download_from_cns(self, continent_code: str, target_file: Path) -> bool:
-    """Attempts to download continent file from CNS if on Google infrastructure."""
-    if not shutil.which("fileutil"):
-      return False
-    cns_path = f"{CNS_ERA5_CLIMATE_BASE}/{continent_code}_climate_indices.txt"
-    try:
-      cmd = ["fileutil", "cp", cns_path, str(target_file)]
-      res = subprocess.run(cmd, capture_output=True, timeout=30)
-      return res.returncode == 0 and target_file.exists()
-    except Exception:
-      return False
 
   def _ensure_file_on_disk(self, continent_code: str) -> bool:
     txt_path = self.cache_dir / f"{continent_code}_climate_indices.txt"
     if txt_path.exists() and txt_path.stat().st_size > 0:
       return True
 
+    logger.info(
+        "Downloading ERA5 climate indices for '%s' from canonical store %s...",
+        continent_code,
+        GCS_ERA5_CLIMATE_URI,
+    )
     if self._download_from_gcs(continent_code, txt_path):
       return True
 
-    if self._download_from_cns(continent_code, txt_path):
-      return True
-
-    logger.warning(
-        "Could not locate %s_climate_indices.txt locally, on GCS, or on CNS.",
-        continent_code,
+    raise FileNotFoundError(
+        f"Could not download {continent_code}_climate_indices.txt from canonical GCS store "
+        f"{GCS_ERA5_CLIMATE_URI} to runtime staging cache {txt_path}."
     )
-    return False
 
   def ensure_continent(
       self, continent_code: str, target_ids: Optional[Set[int]] = None

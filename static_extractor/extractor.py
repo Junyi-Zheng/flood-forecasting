@@ -59,6 +59,7 @@ from static_extractor.climate import (
 from static_extractor.config import (
     ADDITIONAL_PROPERTIES,
     ATTRIBUTE_DEFINITIONS,
+    GCS_HYDROATLAS_GDB_URI,
     IGNORE_PROPERTIES,
     MAJORITY_PROPERTIES,
     POUR_POINT_PROPERTIES,
@@ -134,27 +135,33 @@ class StaticAttributesExtractor:
       self,
       gdb_path: Optional[Union[str, Path]] = None,
       era5_cache_dir: Optional[Union[str, Path]] = None,
-      auto_download: bool = False,
+      auto_download: bool = True,
   ):
     """Initializes the StaticAttributesExtractor.
 
+    Authoritative data sources are strictly:
+      - HydroATLAS: gs://open-multimet/data/hydroatlas/BasinATLAS_v10.gdb/
+      - ERA5 Climate: gs://open-multimet/data/hydroatlas/era5_climate/
+
     Args:
-      gdb_path: Path to BasinATLAS_v10.gdb or BasinATLAS_v10_lev12.shp. If None,
-        resolves via environment variable or default cache locations.
-      era5_cache_dir: Path to directory for caching ERA5 climate index files.
+      gdb_path: Path to runtime staging BasinATLAS_v10.gdb directory. If None,
+        defaults to ~/.cache/googlehydrology/hydroatlas/BasinATLAS_v10.gdb.
+      era5_cache_dir: Path to runtime staging directory for ERA5 climate files.
       auto_download: Whether to automatically download BasinATLAS_v10.gdb from
-        GCS if not found locally.
+        GCS if not staged locally. Defaults to True.
     """
     if gdb_path is not None:
       self.gdb_path = Path(gdb_path)
     else:
       self.gdb_path = get_default_gdb_path()
 
-    if not self.gdb_path.exists() and auto_download:
-      try:
-        self.gdb_path = download_hydroatlas_from_gcs()
-      except Exception as e:
-        logger.warning("Auto-download of HydroATLAS GDB failed: %s", e)
+    if (not self.gdb_path.exists() or not any(self.gdb_path.iterdir())) and auto_download:
+      logger.info(
+          "BasinATLAS GDB not found in runtime cache %s. Automatically downloading from %s...",
+          self.gdb_path,
+          GCS_HYDROATLAS_GDB_URI,
+      )
+      self.gdb_path = download_hydroatlas_from_gcs(target_dir=self.gdb_path)
 
     # Determine if target is a FileGDB directory or shapefile
     self.is_shapefile = str(self.gdb_path).endswith(".shp")

@@ -84,7 +84,10 @@ def download_hydroatlas_from_gcs(
   try:
     import gcsfs
 
-    fs = gcsfs.GCSFileSystem(token="anon")
+    try:
+      fs = gcsfs.GCSFileSystem()
+    except Exception:
+      fs = gcsfs.GCSFileSystem(token="anon")
     clean_src = source_uri.replace("gs://", "").rstrip("/")
     if fs.exists(clean_src):
       dest_path.mkdir(parents=True, exist_ok=True)
@@ -134,7 +137,10 @@ def download_parquet_attributes_from_gcs(
   try:
     import gcsfs
 
-    fs = gcsfs.GCSFileSystem(token="anon")
+    try:
+      fs = gcsfs.GCSFileSystem()
+    except Exception:
+      fs = gcsfs.GCSFileSystem(token="anon")
     clean_src = source_uri.replace("gs://", "")
     if fs.exists(clean_src):
       fs.get(clean_src, str(dest_path))

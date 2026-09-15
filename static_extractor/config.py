@@ -95,15 +95,11 @@ CONTINENT_MAP: Mapping[int, str] = {
     9: "gr",  # Greenland
 }
 
-# 7. Cloud Storage Default URIs
+# 7. Cloud Storage Canonical Data Stores (Authoritative single source of truth)
 GCS_HYDROATLAS_BUCKET: str = "gs://open-multimet/data/hydroatlas"
 GCS_HYDROATLAS_GDB_URI: str = f"{GCS_HYDROATLAS_BUCKET}/BasinATLAS_v10.gdb"
 GCS_ERA5_CLIMATE_URI: str = f"{GCS_HYDROATLAS_BUCKET}/era5_climate"
 GCS_PARQUET_URI: str = f"{GCS_HYDROATLAS_BUCKET}/hydro_atlas_lev12.parquet"
-
-# CNS fallback locations (accessible inside Google infrastructure)
-CNS_ERA5_CLIMATE_BASE: str = "/cns/jn-d/home/floods/partition=ssd/hydrobasins_datasets/era5/2024_03_10_lev12"
-CNS_HYDROATLAS_BASE: str = "/cns/jn-d/home/floods/hydro_model/datasets/external/HydroATLAS"
 
 # Curated Attribute Definitions with Metadata
 ATTRIBUTE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
@@ -182,44 +178,26 @@ ATTRIBUTE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
 
 
 def get_default_gdb_path() -> Path:
-  """Resolves the default path to BasinATLAS_v10.gdb."""
-  env_path = os.environ.get("HYDROATLAS_GDB_PATH") or os.environ.get("BASINATLAS_GDB")
-  if env_path:
-    p = Path(env_path)
-    if p.exists():
-      return p
+  """Returns the local runtime staging path for BasinATLAS_v10.gdb.
 
-  candidates = [
-      Path.home() / ".cache" / "googlehydrology" / "hydroatlas" / "BasinATLAS_v10.gdb",
-      Path.home() / ".cache" / "earthkit_hydro" / "data" / "basin_atlas" / "BasinATLAS_v10.gdb",
-      Path("data/basin_atlas/BasinATLAS_v10.gdb").resolve(),
-      Path("/cns/jn-d/home/floods/hydro_model/datasets/external/HydroATLAS/v10_extracted/BasinATLAS_v10_lev12.shp"),
-  ]
-
-  for c in candidates:
-    if c.exists():
-      return c
-
-  return candidates[0]
+  The authoritative data store is strictly gs://open-multimet/data/hydroatlas/BasinATLAS_v10.gdb.
+  This local directory serves strictly as a temporary runtime staging cache.
+  """
+  return (
+      Path.home()
+      / ".cache"
+      / "googlehydrology"
+      / "hydroatlas"
+      / "BasinATLAS_v10.gdb"
+  )
 
 
 def get_default_era5_cache_dir() -> Path:
-  """Resolves the default directory for caching continental ERA5 climate index files."""
-  env_dir = os.environ.get("ERA5_CLIMATE_DIR")
-  if env_dir:
-    p = Path(env_dir)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+  """Returns the local runtime staging directory for continental ERA5 climate index files.
 
-  candidates = [
-      Path.home() / ".cache" / "googlehydrology" / "era5_climate",
-      Path.home() / ".cache" / "earthkit_hydro" / "data" / "era5_climate",
-  ]
-
-  for c in candidates:
-    if c.exists():
-      return c
-
-  target = candidates[0]
+  The authoritative data store is strictly gs://open-multimet/data/hydroatlas/era5_climate/.
+  This local directory serves strictly as a temporary runtime staging cache.
+  """
+  target = Path.home() / ".cache" / "googlehydrology" / "era5_climate"
   target.mkdir(parents=True, exist_ok=True)
   return target
