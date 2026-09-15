@@ -148,6 +148,49 @@ The `~/flood-forecasting/example-configs` directory contains reference YAML file
   * **Dataset:** CAMELS-US (531 basins)  
   * **Description:** A benchmarking configuration for the State Handoff model tailored for the CAMELS-US dataset, used to compare the handoff approach against other architectures on US-based basin data.
 
+## **Caravan Static Attributes Extractor**
+
+This repository includes the official Caravan static attribute extraction engine (`static_extractor`), designed to compute the full 197+ Caravan physiographic, hydro-climatic, soil, land-cover, and anthropogenic attributes for arbitrary user-supplied watershed polygons (GeoJSON, Shapefile, GeoPackage).
+
+### **Methodology**
+- **Discrete Categorical Attributes:** Aggregated using area-weighted majority voting across intersecting HydroATLAS Level 12 sub-basins.
+- **Continuous Properties:** Aggregated using exact geodesic area-weighted averaging.
+- **Topological Navigation & Pour-Point:** Evaluated by tracing `NEXT_DOWN` downstream outlet reaches.
+- **ERA5-Land Climate Metrics (1981-2020):** Computes canonical Caravan climate indices including mean precipitation (`p_mean`), FAO-56 Penman-Monteith potential evapotranspiration (`pet_mean_FAO_PM`), aridity index, Knoben moisture and seasonality indices, snow fraction (`frac_snow`), and extreme event frequency/duration (`high_prec_freq`, `high_prec_dur`, `low_prec_freq`, `low_prec_dur`).
+
+### **Data Access (Google Cloud Storage)**
+The HydroATLAS v1.0 geodatabase (`BasinATLAS_v10.gdb`) and continental Level 12 precomputed climate tables are hosted in Google Cloud Storage:
+```bash
+# HydroATLAS Geodatabase:
+gs://open-multimet/data/hydroatlas/BasinATLAS_v10.gdb/
+
+# Precomputed Continental Climate Indices:
+gs://open-multimet/data/hydroatlas/era5_climate/
+
+# Level 12 Tabular Parquet:
+gs://open-multimet/data/hydroatlas/hydro_atlas_lev12.parquet
+```
+
+### **Command Line Usage**
+Extract Caravan attributes from any watershed polygon file directly:
+```bash
+extract-caravan-static \
+    --input /path/to/watershed_polygons.geojson \
+    --output /path/to/extracted_caravan_attributes.csv \
+    [--id-column gauge_id] \
+    [--gdb-path /path/to/BasinATLAS_v10.gdb]
+```
+
+### **Python API**
+```python
+from static_extractor import StaticAttributesExtractor
+
+extractor = StaticAttributesExtractor()
+# Extract for a GeoDataFrame or GeoJSON Feature
+res = extractor.extract_attributes_for_polygon(polygon_feature, catchment_id="basin_01")
+df = extractor.extract_attributes_from_file("my_basins.geojson", "attributes.csv")
+```
+
 ## **Issue Reporting**
 
 If you encounter bugs, please use the [GitHub Issue Tracker](https://github.com/google-research/flood-forecasting/issues). Provide a clear description, steps to reproduce, and the expected behavior.
