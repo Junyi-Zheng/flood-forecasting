@@ -92,6 +92,13 @@ def parse_args(args=None):
       type=str,
       help="GCS URI or path to gridded daily ERA5 Zarr store. Defaults to gs://open-multimet/data/era5_land/daily_surface.zarr.",
   )
+  parser.add_argument(
+      "--workers",
+      "-w",
+      default=1,
+      type=int,
+      help="Number of parallel worker processes to use (default: 1).",
+  )
   return parser.parse_args(args)
 
 
@@ -111,12 +118,17 @@ def main(args=None):
       gridded_era5_uri=parsed.gridded_era5_uri,
   )
 
-  logger.info("Extracting static attributes from '%s'...", input_path)
+  logger.info(
+      "Extracting static attributes from '%s' (workers=%d)...",
+      input_path,
+      parsed.workers,
+  )
   df = extractor.extract_attributes_from_file(
       input_path=input_path,
       output_csv_path=parsed.output,
       id_column=parsed.id_column,
       min_overlap_threshold=parsed.min_overlap_threshold,
+      workers=parsed.workers,
   )
 
   logger.info(

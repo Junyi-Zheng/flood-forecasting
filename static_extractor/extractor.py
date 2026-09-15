@@ -74,6 +74,44 @@ from static_extractor.gcs import download_hydroatlas_from_gcs
 
 logger = logging.getLogger(__name__)
 
+_WORKER_EXTRACTOR: Optional[StaticAttributesExtractor] = None
+
+
+def _get_worker_extractor(
+    gdb_path: str,
+    era5_cache_dir: Optional[str],
+    gridded_era5_uri: Optional[str],
+) -> StaticAttributesExtractor:
+  global _WORKER_EXTRACTOR
+  if _WORKER_EXTRACTOR is None:
+    _WORKER_EXTRACTOR = StaticAttributesExtractor(
+        gdb_path=gdb_path,
+        era5_cache_dir=era5_cache_dir,
+        gridded_era5_uri=gridded_era5_uri,
+        auto_download=False,
+    )
+  return _WORKER_EXTRACTOR
+
+
+def _worker_extract_polygon(args: tuple) -> Dict[str, Any]:
+  (
+      geom,
+      gid,
+      min_overlap_threshold,
+      era5_source,
+      gdb_path,
+      era5_cache_dir,
+      gridded_era5_uri,
+  ) = args
+  ext = _get_worker_extractor(gdb_path, era5_cache_dir, gridded_era5_uri)
+  return ext.extract_attributes_for_polygon(
+      geom,
+      catchment_id=gid,
+      min_overlap_threshold=min_overlap_threshold,
+      era5_source=era5_source,
+  )
+
+
 
 def compute_pour_point_properties(
     basin_data: Dict[str, List[Any]],
@@ -617,6 +655,7 @@ class StaticAttributesExtractor:
       id_column: Optional[str] = None,
       min_overlap_threshold: float = 0.0,
       era5_source: Optional[str] = None,
+      workers: int = 1,
   ) -> pd.DataFrame:
     """Extracts Caravan attributes for all features in a vector file (Shapefile, GeoJSON, GeoPackage).
 
@@ -626,6 +665,7 @@ class StaticAttributesExtractor:
       id_column: Name of column to use for basin / gauge ID.
       min_overlap_threshold: Minimum area threshold in km2.
       era5_source: Optional ERA5 sourcing mode override ('hybas' or 'gridded').
+      workers: Number of parallel processes to use (default 1).
 
     Returns:
       Pandas DataFrame with extracted attributes, indexed by gauge_id.
@@ -636,21 +676,47 @@ class StaticAttributesExtractor:
 
     # Determine ID column
     if id_column is None:
-      for candidate in ["gauge_id", "catchment_id", "id", "basin_id", "HYBAS_ID"]:
+      for candidate in ["gauge_id", "catchment_id", "id", "basin_id", "HYBAS_ID", "gauge_id_"]:
         if candidate in gdf.columns:
           id_column = candidate
           break
 
-    results = []
+    tasks = []
     for idx, row in gdf.iterrows():
       gid = str(row[id_column]) if id_column and id_column in row else f"basin_{idx+1}"
-      res = self.extract_attributes_for_polygon(
-          row.geometry,
-          catchment_id=gid,
-          min_overlap_threshold=min_overlap_threshold,
-          era5_source=era5_source,
+      tasks.append((row.geometry, gid))
+
+    if workers > 1 and len(tasks) > 1:
+      import concurrent.futures
+      worker_args = [
+          (
+              geom,
+              gid,
+              min_overlap_threshold,
+              era5_source,
+              str(self.gdb_path),
+              str(self.era5_cache_dir),
+              self.gridded_era5_uri,
+          )
+          for geom, gid in tasks
+      ]
+      logger.info(
+          "Processing %d catchments in parallel with %d workers...",
+          len(tasks),
+          workers,
       )
-      results.append(res)
+      with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(_worker_extract_polygon, worker_args))
+    else:
+      results = []
+      for geom, gid in tasks:
+        res = self.extract_attributes_for_polygon(
+            geom,
+            catchment_id=gid,
+            min_overlap_threshold=min_overlap_threshold,
+            era5_source=era5_source,
+        )
+        results.append(res)
 
     df = self.export_caravan_csv(
         results, output_csv_path=output_csv_path if output_csv_path else None

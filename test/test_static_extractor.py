@@ -188,10 +188,12 @@ def test_cli_parsing():
       "--input", "basins.geojson",
       "--output", "attrs.csv",
       "--era5-source", "gridded",
-      "--gridded-era5-uri", "gs://my-bucket/era5.zarr"
+      "--gridded-era5-uri", "gs://my-bucket/era5.zarr",
+      "--workers", "16",
   ])
   assert args_gridded.era5_source == "gridded"
   assert args_gridded.gridded_era5_uri == "gs://my-bucket/era5.zarr"
+  assert args_gridded.workers == 16
 
 
 def test_era5_gridded_extractor_synthetic(tmp_path):
