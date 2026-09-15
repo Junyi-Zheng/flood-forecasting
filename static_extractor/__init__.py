@@ -21,6 +21,7 @@ the official Caravan and HydroATLAS Level 12 aggregation methodology.
 
 from static_extractor.climate import (
     ERA5ClimateLoader,
+    ERA5GriddedExtractor,
     calculate_fao_pm_pet,
     calculate_knoben_moisture_and_seasonality,
     compute_caravan_climate_metrics,
@@ -29,7 +30,9 @@ from static_extractor.config import (
     ADDITIONAL_PROPERTIES,
     ATTRIBUTE_DEFINITIONS,
     CONTINENT_MAP,
+    DEFAULT_ERA5_SOURCE,
     GCS_ERA5_CLIMATE_URI,
+    GCS_ERA5_GRIDDED_ZARR_URI,
     GCS_HYDROATLAS_BUCKET,
     GCS_HYDROATLAS_GDB_URI,
     GCS_PARQUET_URI,
@@ -52,6 +55,7 @@ from static_extractor.gcs import (
 __all__ = [
     "StaticAttributesExtractor",
     "ERA5ClimateLoader",
+    "ERA5GriddedExtractor",
     "compute_caravan_climate_metrics",
     "calculate_fao_pm_pet",
     "calculate_knoben_moisture_and_seasonality",
@@ -67,8 +71,10 @@ __all__ = [
     "ADDITIONAL_PROPERTIES",
     "UPSTREAM_PROPERTIES",
     "CONTINENT_MAP",
+    "DEFAULT_ERA5_SOURCE",
     "GCS_HYDROATLAS_BUCKET",
     "GCS_HYDROATLAS_GDB_URI",
     "GCS_ERA5_CLIMATE_URI",
     "GCS_PARQUET_URI",
+    "GCS_ERA5_GRIDDED_ZARR_URI",
 ]

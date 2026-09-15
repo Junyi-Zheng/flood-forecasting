@@ -155,25 +155,37 @@ This repository includes the official Caravan static attribute extraction engine
 👉 **Full Documentation, Methodology, and API Reference:** See the [Caravan Static Attributes Extractor Documentation](static_extractor/README.md).
 
 ### **Quick Highlights**
-- **Canonical Data Stores:** Hosted in Google Cloud Storage at [`gs://open-multimet/data/hydroatlas/BasinATLAS_v10.gdb/`](gs://open-multimet/data/hydroatlas/BasinATLAS_v10.gdb/) and [`gs://open-multimet/data/hydroatlas/era5_climate/`](gs://open-multimet/data/hydroatlas/era5_climate/). Automatically staged locally on demand.
+- **Canonical Data Stores:** Hosted in Google Cloud Storage at [`gs://open-multimet/data/hydroatlas/`](gs://open-multimet/data/hydroatlas/) and [`gs://open-multimet/data/era5_land/daily_surface.zarr`](gs://open-multimet/data/era5_land/daily_surface.zarr). Automatically staged locally on demand.
 - **Strict Caravan Spatial Aggregation:** Area-weighted averaging for continuous attributes, area-weighted majority voting for discrete categorical classes, and downstream topological routing (`NEXT_DOWN`) for pour-point properties.
 - **Global 40-Year ERA5-Land Climate Metrics (1981–2020):** FAO-56 Penman-Monteith PET, aridity index, snow fraction, Knoben annual moisture and seasonality indices, and Addor extreme precipitation metrics.
-- **High Performance:** ~20–25 ms per basin; extracts 50,000 polygons in ~20 minutes sequentially or under 1 minute with multi-core parallelism.
+- **Dual Climate Calculation Modes:** Support for ultra-fast precalculated HydroSHEDS Level 12 sub-basin aggregation (`--era5-source hybas`, default, ~20 ms/basin) or recalculating directly on the fly from archived gridded ERA5 daily surface Zarr (`--era5-source gridded`).
+- **High Performance:** ~20–25 ms per basin (`hybas`); extracts 50,000 polygons in ~20 minutes sequentially or under 1 minute with multi-core parallelism.
 
 ### **Quick Command-Line Usage**
 ```bash
+# Fast mode using precalculated HYBAS sub-basin climate statistics (default)
+extract-caravan-static \
+    --input /path/to/watershed_polygons.geojson \
+    --output /path/to/extracted_caravan_attributes.csv
+
+# Or recalculate climate indices directly from archived daily gridded ERA5 Zarr
 extract-caravan-static \
     --input /path/to/watershed_polygons.geojson \
     --output /path/to/extracted_caravan_attributes.csv \
-    [--id-column gauge_id]
+    --era5-source gridded
 ```
 
 ### **Quick Python API**
 ```python
 from static_extractor import StaticAttributesExtractor
 
-extractor = StaticAttributesExtractor()
+# Default precalculated HYBAS mode
+extractor = StaticAttributesExtractor(era5_source="hybas")
 df = extractor.extract_attributes_from_file("basins.geojson", "attributes.csv")
+
+# Direct gridded ERA5 recalculation mode
+extractor_gridded = StaticAttributesExtractor(era5_source="gridded")
+df_gridded = extractor_gridded.extract_attributes_from_file("basins.geojson", "attributes_gridded.csv")
 ```
 
 ## **Issue Reporting**

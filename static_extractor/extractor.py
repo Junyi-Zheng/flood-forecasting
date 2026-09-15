@@ -54,11 +54,14 @@ except ImportError:
 
 from static_extractor.climate import (
     ERA5ClimateLoader,
+    ERA5GriddedExtractor,
     compute_caravan_climate_metrics,
 )
 from static_extractor.config import (
     ADDITIONAL_PROPERTIES,
     ATTRIBUTE_DEFINITIONS,
+    DEFAULT_ERA5_SOURCE,
+    GCS_ERA5_GRIDDED_ZARR_URI,
     GCS_HYDROATLAS_GDB_URI,
     IGNORE_PROPERTIES,
     MAJORITY_PROPERTIES,
@@ -136,12 +139,15 @@ class StaticAttributesExtractor:
       gdb_path: Optional[Union[str, Path]] = None,
       era5_cache_dir: Optional[Union[str, Path]] = None,
       auto_download: bool = True,
+      era5_source: str = DEFAULT_ERA5_SOURCE,
+      gridded_era5_uri: Optional[str] = None,
   ):
     """Initializes the StaticAttributesExtractor.
 
     Authoritative data sources are strictly:
       - HydroATLAS: gs://open-multimet/data/hydroatlas/BasinATLAS_v10.gdb/
-      - ERA5 Climate: gs://open-multimet/data/hydroatlas/era5_climate/
+      - ERA5 Climate (hybas): gs://open-multimet/data/hydroatlas/era5_climate/
+      - ERA5 Gridded (gridded): gs://open-multimet/data/era5_land/daily_surface.zarr
 
     Args:
       gdb_path: Path to runtime staging BasinATLAS_v10.gdb directory. If None,
@@ -149,7 +155,16 @@ class StaticAttributesExtractor:
       era5_cache_dir: Path to runtime staging directory for ERA5 climate files.
       auto_download: Whether to automatically download BasinATLAS_v10.gdb from
         GCS if not staged locally. Defaults to True.
+      era5_source: Sourcing mode for ERA5 climate attributes. Options:
+        - "hybas": Fast area-weighted aggregation of precalculated Level 12
+          sub-basin climate metrics (default, ~20ms per basin).
+        - "gridded": Recalculate directly on the fly from archived gridded ERA5
+          daily surface Zarr data on GCS.
+      gridded_era5_uri: Optional GCS URI or path to gridded daily ERA5 Zarr store.
     """
+    self.era5_source = era5_source.lower() if era5_source else "hybas"
+    self.gridded_era5_uri = gridded_era5_uri or GCS_ERA5_GRIDDED_ZARR_URI
+
     if gdb_path is not None:
       self.gdb_path = Path(gdb_path)
     else:
@@ -202,8 +217,9 @@ class StaticAttributesExtractor:
         p for p in self.use_properties if p not in ADDITIONAL_PROPERTIES
     ]
 
-    # Initialize ERA5 climate indices loader
+    # Initialize ERA5 climate loaders
     self.era5_loader = ERA5ClimateLoader(cache_dir=era5_cache_dir)
+    self.gridded_extractor = ERA5GriddedExtractor(zarr_uri=self.gridded_era5_uri)
 
   def _read_subbasins_in_bbox(
       self, bbox: Tuple[float, float, float, float]
@@ -231,6 +247,7 @@ class StaticAttributesExtractor:
       min_overlap_threshold: float = 0.0,
       baseline_years: Tuple[int, int] = (1981, 2020),
       timeseries_df: Optional[pd.DataFrame] = None,
+      era5_source: Optional[str] = None,
   ) -> Dict[str, Any]:
     """Calculates exact Caravan HydroATLAS static attributes for an arbitrary watershed polygon.
 
@@ -423,6 +440,8 @@ class StaticAttributesExtractor:
 
     # 6. Extract / Compute ERA5-Land Climate Attributes (1981-2020)
     era5_indices = {}
+    actual_era5_source = (era5_source or self.era5_source).lower()
+
     if timeseries_df is not None and not timeseries_df.empty:
       # Compute directly from provided daily timeseries DataFrame
       p_col = next((c for c in ["total_precipitation", "prcp", "precip", "tp"] if c in timeseries_df.columns), None)
@@ -441,6 +460,19 @@ class StaticAttributesExtractor:
             pet_era5=pet_era5_series,
             pet_fao=pet_fao_series,
         )
+    elif actual_era5_source == "gridded":
+      # Recalculate directly on the fly from archived gridded ERA5 data on GCS
+      try:
+        era5_indices = self.gridded_extractor.extract_climate_metrics_for_polygon(
+            geom, baseline_years=baseline_years
+        )
+      except Exception as e:
+        logger.warning(
+            "Gridded ERA5 extraction failed for catchment '%s': %s. Falling back to HYBAS statistics.",
+            catchment_id,
+            e,
+        )
+        era5_indices = {}
 
     if not era5_indices or all(pd.isna(v) for v in era5_indices.values()):
       # Load from Level 12 precomputed continental climate indices table
@@ -553,6 +585,7 @@ class StaticAttributesExtractor:
       self,
       features: List[Union[Dict[str, Any], Polygon, MultiPolygon]],
       min_overlap_threshold: float = 0.0,
+      era5_source: Optional[str] = None,
   ) -> List[Dict[str, Any]]:
     """Extracts exact Caravan attributes for a list of watershed features."""
     results = []
@@ -569,7 +602,10 @@ class StaticAttributesExtractor:
       else:
         c_id = f"basin_{i+1}"
       res = self.extract_attributes_for_polygon(
-          feat, catchment_id=c_id, min_overlap_threshold=min_overlap_threshold
+          feat,
+          catchment_id=c_id,
+          min_overlap_threshold=min_overlap_threshold,
+          era5_source=era5_source,
       )
       results.append(res)
     return results
@@ -580,6 +616,7 @@ class StaticAttributesExtractor:
       output_csv_path: Optional[Union[str, Path]] = None,
       id_column: Optional[str] = None,
       min_overlap_threshold: float = 0.0,
+      era5_source: Optional[str] = None,
   ) -> pd.DataFrame:
     """Extracts Caravan attributes for all features in a vector file (Shapefile, GeoJSON, GeoPackage).
 
@@ -588,6 +625,7 @@ class StaticAttributesExtractor:
       output_csv_path: Optional path to save extracted attributes CSV.
       id_column: Name of column to use for basin / gauge ID.
       min_overlap_threshold: Minimum area threshold in km2.
+      era5_source: Optional ERA5 sourcing mode override ('hybas' or 'gridded').
 
     Returns:
       Pandas DataFrame with extracted attributes, indexed by gauge_id.
@@ -610,6 +648,7 @@ class StaticAttributesExtractor:
           row.geometry,
           catchment_id=gid,
           min_overlap_threshold=min_overlap_threshold,
+          era5_source=era5_source,
       )
       results.append(res)
 

@@ -17,6 +17,7 @@ The `static_extractor` package is the official, open-source static attribute ext
   - Snow fraction (`frac_snow`, $T < 0^\circ\text{C}$).
   - Knoben et al. (2018) annual moisture and seasonality indices.
   - Addor et al. (2017) extreme high precipitation frequency/duration and dry spell frequency/duration.
+  - **Flexible Calculation Modes:** Choose between ultra-fast precalculated HydroSHEDS Level 12 subcatchment statistics (`hybas`, ~20 ms/basin) or recalculating directly from archived gridded ERA5 daily Zarr (`gridded`).
 - **High-Performance Spatial Querying:**
   - Leverages native R-Tree spatial indexing in ESRI FileGDB (`pyogrio`) to read only overlapping Level 12 subcatchments in **10–15 ms per polygon**.
   - In-memory continental caching reduces per-basin lookup to **< 25 ms**, scaling to 50,000 polygons in ~20 minutes on a single core or ~1 minute with multi-core parallelism.
@@ -34,6 +35,7 @@ The extractor enforces a **single, authoritative source of truth** hosted on Goo
 | **HydroATLAS Geodatabase** | `gs://open-multimet/data/hydroatlas/BasinATLAS_v10.gdb/` | Full global ESRI FileGDB containing the `BasinATLAS_v10_lev12` layer (5.5 GiB, 1,034,083 Level 12 subcatchments). |
 | **ERA5-Land Climate Tables** | `gs://open-multimet/data/hydroatlas/era5_climate/` | 9 continental precomputed Level 12 climate tables (`af`, `ar`, `as`, `au`, `eu`, `gr`, `na`, `sa`, `si`; 1,034,027 basins). |
 | **HydroATLAS Tabular Parquet** | `gs://open-multimet/data/hydroatlas/hydro_atlas_lev12.parquet` | Complete pre-indexed tabular HydroATLAS Level 12 attributes (233 MiB). |
+| **Gridded ERA5-Land Zarr** | `gs://open-multimet/data/era5_land/daily_surface.zarr` | Archived daily surface gridded ERA5-Land dataset used when `--era5-source gridded` is selected. |
 
 ### 2. Local Runtime Staging Cache
 To enable fast random spatial reads by GDAL/`pyogrio`, the extractor stages data locally during runtime execution:
@@ -65,16 +67,24 @@ To enable fast random spatial reads by GDAL/`pyogrio`, the extractor stages data
 The package installs console script `extract-caravan-static` (alias `extract-static-attributes`):
 
 ```bash
-# Basic usage
+# Basic usage (default: fast precalculated HydroSHEDS Level 12 catchment statistics)
 extract-caravan-static \
     --input /path/to/watershed_polygons.geojson \
     --output /path/to/extracted_caravan_attributes.csv
 
-# With custom ID column and overlap threshold
+# Using direct recalculation from archived daily gridded ERA5 Zarr
+extract-caravan-static \
+    --input /path/to/watershed_polygons.geojson \
+    --output /path/to/extracted_caravan_attributes.csv \
+    --era5-source gridded
+
+# With custom ID column, overlap threshold, and explicit GCS gridded Zarr URI
 extract-caravan-static \
     --input /path/to/basins.shp \
     --output /path/to/attributes.csv \
     --id-column gauge_id \
+    --era5-source gridded \
+    --gridded-era5-uri gs://open-multimet/data/era5_land/daily_surface.zarr \
     --min-overlap-threshold 0.5
 ```
 
@@ -82,6 +92,10 @@ extract-caravan-static \
 - `--input`, `-i`: Path to vector polygon file (`.geojson`, `.shp`, `.gpkg`).
 - `--output`, `-o`: Path to output CSV file for extracted Caravan attributes.
 - `--id-column`: Name of the property column containing the catchment/gauge identifier (defaults to auto-detection: `gauge_id`, `catchment_id`, `id`, `basin_id`).
+- `--era5-source`: Choice of ERA5 climate attribute calculation method (`hybas` or `gridded`, default: `hybas`):
+  - `hybas`: Fast area-weighted aggregation of precomputed HydroSHEDS Level 12 sub-basin statistics (~20 ms/basin).
+  - `gridded`: Recalculates climate indices directly on the fly from 40-year daily surface gridded ERA5-Land data on GCS.
+- `--gridded-era5-uri`: Custom GCS URI or local path for the daily surface ERA5 Zarr store (defaults to `gs://open-multimet/data/era5_land/daily_surface.zarr`).
 - `--min-overlap-threshold`: Minimum sub-basin overlap area in $\text{km}^2$ to filter boundary slivers (default `0.0`).
 - `--gdb-path`, `-g`: Optional override path to local `BasinATLAS_v10.gdb` (defaults to runtime cache).
 - `--era5-cache-dir`: Optional override directory for ERA5 climate files (defaults to runtime cache).
@@ -94,13 +108,21 @@ extract-caravan-static \
 ```python
 from static_extractor import StaticAttributesExtractor
 
-extractor = StaticAttributesExtractor()
+# Standard fast mode using precalculated HYBAS subcatchments
+extractor = StaticAttributesExtractor(era5_source="hybas")
 df = extractor.extract_attributes_from_file(
     input_path="basins.geojson",
     output_csv_path="caravan_attributes.csv",
     id_column="gauge_id",
 )
 print(df.head())
+
+# Or recalculate climate indices directly from gridded ERA5-Land Zarr
+extractor_gridded = StaticAttributesExtractor(era5_source="gridded")
+df_gridded = extractor_gridded.extract_attributes_from_file(
+    input_path="basins.geojson",
+    output_csv_path="caravan_attributes_gridded.csv",
+)
 ```
 
 ### 2. Extract for an Arbitrary Shapely Polygon / GeoJSON
@@ -119,9 +141,11 @@ polygon = shapely.geometry.Polygon([
     [-86.9, 40.4],
 ])
 
+# Extract with default HYBAS or choose on-the-fly:
 result = extractor.extract_attributes_for_polygon(
     polygon,
     catchment_id="my_basin_01",
+    era5_source="hybas",  # or "gridded"
 )
 
 # Full Caravan dictionary (197+ properties)
@@ -145,11 +169,13 @@ extractor.append_attributes_to_zarr(
 
 ## ⚡ Performance & Scaling
 
-| Scale | Single-Core Sequential | 16-Core Parallel | 32-Core Parallel |
-| :--- | :--- | :--- | :--- |
-| **1 Basin** | 20 – 25 ms | — | — |
-| **1,000 Basins** | ~22 seconds | ~1.5 seconds | ~0.8 seconds |
-| **50,000 Basins** | **~18 to 20 minutes** | **~1.3 minutes** | **~45 seconds** |
+| Mode | Scale | Single-Core Sequential | 16-Core Parallel | 32-Core Parallel |
+| :--- | :--- | :--- | :--- | :--- |
+| **`hybas` (Precalculated)** | **1 Basin** | 20 – 25 ms | — | — |
+| **`hybas` (Precalculated)** | **1,000 Basins** | ~22 seconds | ~1.5 seconds | ~0.8 seconds |
+| **`hybas` (Precalculated)** | **50,000 Basins** | **~18 to 20 minutes** | **~1.3 minutes** | **~45 seconds** |
+| **`gridded` (Recalculated)** | **1 Basin** | 2 – 5 seconds | — | — |
+| **`gridded` (Recalculated)** | **1,000 Basins** | ~40 minutes | ~3 minutes | ~1.5 minutes |
 
 *Note: Initial run on an empty cache requires a one-time download of `BasinATLAS_v10.gdb` (5.5 GiB, ~15–30s on Google Cloud network).*
 

@@ -80,6 +80,18 @@ def parse_args(args=None):
       default=True,
       help="Automatically download data from canonical Google Cloud Storage if not staged locally.",
   )
+  parser.add_argument(
+      "--era5-source",
+      choices=["hybas", "gridded"],
+      default="hybas",
+      help="Source for ERA5 climate metrics: 'hybas' (fast area-weighted aggregation of precalculated Level 12 sub-basin statistics) or 'gridded' (recalculated on the fly from archived gridded ERA5 daily surface data on GCS).",
+  )
+  parser.add_argument(
+      "--gridded-era5-uri",
+      default=None,
+      type=str,
+      help="GCS URI or path to gridded daily ERA5 Zarr store. Defaults to gs://open-multimet/data/era5_land/daily_surface.zarr.",
+  )
   return parser.parse_args(args)
 
 
@@ -90,11 +102,13 @@ def main(args=None):
     logger.error("Input file '%s' does not exist.", input_path)
     sys.exit(1)
 
-  logger.info("Initializing Caravan Static Attributes Extractor...")
+  logger.info("Initializing Caravan Static Attributes Extractor (ERA5 source: %s)...", parsed.era5_source)
   extractor = StaticAttributesExtractor(
       gdb_path=parsed.gdb_path,
       era5_cache_dir=parsed.era5_cache_dir,
       auto_download=parsed.auto_download,
+      era5_source=parsed.era5_source,
+      gridded_era5_uri=parsed.gridded_era5_uri,
   )
 
   logger.info("Extracting static attributes from '%s'...", input_path)

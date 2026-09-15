@@ -182,3 +182,54 @@ def test_cli_parsing():
   assert args.input == "basins.geojson"
   assert args.output == "attrs.csv"
   assert args.min_overlap_threshold == 0.0
+  assert args.era5_source == "hybas"
+
+  args_gridded = parse_args([
+      "--input", "basins.geojson",
+      "--output", "attrs.csv",
+      "--era5-source", "gridded",
+      "--gridded-era5-uri", "gs://my-bucket/era5.zarr"
+  ])
+  assert args_gridded.era5_source == "gridded"
+  assert args_gridded.gridded_era5_uri == "gs://my-bucket/era5.zarr"
+
+
+def test_era5_gridded_extractor_synthetic(tmp_path):
+  """Tests ERA5GriddedExtractor with a synthetic local Zarr dataset."""
+  import zarr
+  import shapely.geometry
+  from static_extractor.climate import ERA5GriddedExtractor
+
+  zarr_dir = tmp_path / "synthetic_era5.zarr"
+  root = zarr.open_group(str(zarr_dir), mode="w")
+
+  n_times = 50
+  lats = np.linspace(40.0, 41.0, 11, dtype=np.float32)
+  lons = np.linspace(-87.0, -86.0, 11, dtype=np.float32)
+
+  # Coordinates
+  root.create_array("latitude", data=lats)
+  root.create_array("longitude", data=lons)
+  time_arr = root.create_array("time", data=np.arange(n_times, dtype=np.int64))
+  time_arr.attrs["units"] = "days since 2000-01-01"
+
+  # Climate data arrays (time, lat, lon)
+  p_data = np.full((n_times, len(lats), len(lons)), 4.0, dtype=np.float32)
+  t_data = np.full((n_times, len(lats), len(lons)), 18.0, dtype=np.float32)
+  pet_data = np.full((n_times, len(lats), len(lons)), 2.0, dtype=np.float32)
+
+  root.create_array("era5land_total_precipitation", data=p_data)
+  root.create_array("era5land_temperature_2m", data=t_data)
+  root.create_array("era5land_potential_evaporation_FAO_PENMAN_MONTEITH", data=pet_data)
+
+  extractor = ERA5GriddedExtractor(zarr_uri=str(zarr_dir))
+
+  # Test polygon covering central region
+  poly = shapely.geometry.box(-86.8, 40.2, -86.2, 40.8)
+  metrics = extractor.extract_climate_metrics_for_polygon(poly, baseline_years=None)
+
+  assert metrics["p_mean"] == 4.0
+  assert metrics["pet_mean_FAO_PM"] == 2.0
+  assert metrics["aridity_FAO_PM"] == 0.5
+  assert metrics["frac_snow"] == 0.0
+
