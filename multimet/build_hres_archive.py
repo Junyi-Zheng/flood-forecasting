@@ -437,8 +437,8 @@ def write_batch_in_place(
   root = zarr.open_group(mapper, mode="r+")
 
   if date_to_idx is None:
-    time_raw = root["time"][:]
-    time_pd = pd.to_datetime(time_raw)
+    existing_ds = xr.open_zarr(mapper, consolidated=False)
+    time_pd = pd.to_datetime(existing_ds["time"].values)
     date_to_idx = {t.strftime("%Y-%m-%d"): i for i, t in enumerate(time_pd)}
 
   batch_dates = pd.to_datetime(ds_batch["time"].values)
@@ -543,9 +543,8 @@ def build_hres_archive(
       mapper = fs.get_mapper(clean_target)
     else:
       mapper = fsspec.get_mapper(full_target_url)
-    root = zarr.open_group(mapper, mode="r+")
-    time_raw = root["time"][:]
-    time_pd = pd.to_datetime(time_raw)
+    existing_ds = xr.open_zarr(mapper, consolidated=False)
+    time_pd = pd.to_datetime(existing_ds["time"].values)
     date_to_idx = {t.strftime("%Y-%m-%d"): i for i, t in enumerate(time_pd)}
     logging.info(
         "In-place update mode enabled across %d dates (%s to %s).",
