@@ -26,7 +26,13 @@ import torch
 import torch.cuda
 
 
-@torch.compile()
+try:
+    _compile_decorator = torch.compile()
+except Exception:
+    _compile_decorator = lambda fn: fn
+
+
+@_compile_decorator
 def generate_predictions(
     mu: torch.Tensor, b: torch.Tensor, tau: torch.Tensor, pi: torch.Tensor
 ) -> torch.Tensor:
