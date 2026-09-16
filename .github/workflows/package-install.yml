@@ -17,6 +17,7 @@ name: test package installation
 on:
   pull_request:
     branches:
+      - main
       - master
 
 jobs:
@@ -28,7 +29,7 @@ jobs:
 
       - uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Try installing the package
         run: pip install --no-deps .
