@@ -479,6 +479,15 @@ class StaticAttributesExtractor:
               )
           )
 
+    # 5b. Downstream Outlet Pour-Point Properties
+    pour_point_attrs = compute_pour_point_properties(
+        basin_data,
+        min_overlap_threshold=min_overlap_threshold,
+        pour_point_properties=POUR_POINT_PROPERTIES,
+    )
+    for k, v in pour_point_attrs.items():
+      caravan_attributes[k] = v
+
     # 6. Extract / Compute ERA5-Land Climate Attributes (1981-2020)
     era5_indices = {}
     actual_era5_source = (era5_source or self.era5_source).lower()

@@ -38,6 +38,9 @@ setup(
         'googlehydrology.evaluation',
         'static_extractor',
     ],
+    package_data={
+        'static_extractor': ['data/*.parquet'],
+    },
     url='https://googlehydrology.readthedocs.io',
     project_urls={
         'Documentation': 'https://googlehydrology.readthedocs.io',
@@ -57,6 +60,7 @@ setup(
             'extract-static-attributes=static_extractor.cli:main',
             'extract-caravan-static-batch=static_extractor.batch_runner:main',
             'extract-static-attributes-batch=static_extractor.batch_runner:main',
+            'benchmark-static-extractor=static_extractor.benchmark:main',
         ]
     },
     python_requires='>=3.12',

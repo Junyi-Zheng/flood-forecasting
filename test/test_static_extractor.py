@@ -266,4 +266,74 @@ def test_batch_runner_discovery(tmp_path):
   assert datasets_nested["lamah"].name == "lamah_basin_shapes.shp"
 
 
+def test_benchmark_metrics_continuous():
+  """Tests continuous statistical validation metrics calculation."""
+  from static_extractor.benchmark import compute_continuous_metrics
+
+  y_true = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
+  y_pred = np.array([10.1, 19.9, 30.2, 39.8, 50.1])
+
+  res = compute_continuous_metrics(y_true, y_pred)
+  assert res["n"] == 5
+  assert res["pearson_r"] > 0.999
+  assert res["spearman_rho"] == 1.0
+  assert res["r2"] > 0.999
+  assert res["mae"] < 0.2
+  assert res["rmse"] < 0.2
+  assert res["med_rel_error_pct"] < 1.0
+
+
+def test_benchmark_metrics_categorical():
+  """Tests categorical classification accuracy calculation."""
+  from static_extractor.benchmark import compute_categorical_metrics
+
+  y_true = np.array([1, 2, 3, 4, 5, 2, 1, 3])
+  y_pred = np.array([1, 2, 3, 4, 5, 2, 1, 4])  # 7 out of 8 match
+
+  res = compute_categorical_metrics(y_true, y_pred)
+  assert res["n"] == 8
+  assert res["accuracy_pct"] == 87.5
+  assert res["classes_count"] == 5
+
+
+def test_benchmark_attribute_categorization():
+  """Tests categorization of all standard attribute names."""
+  from static_extractor.benchmark import get_attribute_category
+
+  assert get_attribute_category("ele_mt_sav") == "Topography"
+  assert get_attribute_category("tmp_dc_syr") == "Climate (HydroATLAS)"
+  assert get_attribute_category("p_mean") == "Caravan ERA5 Climate"
+  assert get_attribute_category("aridity_ERA5_LAND") == "Caravan ERA5 Climate"
+  assert get_attribute_category("run_mm_syr") == "Hydrology"
+  assert get_attribute_category("cly_pc_sav") == "Soils & Geology"
+  assert get_attribute_category("for_pc_sse") == "Land Cover"
+  assert get_attribute_category("ppd_pk_sav") == "Anthropogenic"
+  assert get_attribute_category("glc_cl_smj") == "Land Cover"
+  assert get_attribute_category("wet_cl_smj") == "Hydrology"
+
+
+def test_benchmark_run_mini(tmp_path):
+  """Tests executing a mini benchmark run with 4 basins."""
+  from static_extractor.benchmark import run_benchmark, DEFAULT_BENCHMARK_PATH
+
+  if not DEFAULT_BENCHMARK_PATH.exists():
+    pytest.skip("Benchmark parquet not found.")
+
+  attr_df, basin_df = run_benchmark(
+      samples=4,
+      workers=2,
+      output_dir=str(tmp_path),
+  )
+
+  assert len(basin_df) == 4
+  assert len(attr_df) == 210
+  assert (tmp_path / "benchmark_report.md").exists()
+  assert (tmp_path / "benchmark_attribute_metrics.csv").exists()
+  assert (tmp_path / "benchmark_basin_metrics.csv").exists()
+  report_text = (tmp_path / "benchmark_report.md").read_text()
+  assert "Executive Summary" in report_text
+  assert "Total Basins Evaluated" in report_text
+
+
+
 

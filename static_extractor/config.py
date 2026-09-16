@@ -40,7 +40,17 @@ MAJORITY_PROPERTIES: List[str] = [
 ]
 
 # 2. Pour-Point / Upstream Terminal Properties
-POUR_POINT_PROPERTIES: List[str] = []
+POUR_POINT_PROPERTIES: List[str] = [
+    "dis_m3_pmn",
+    "dis_m3_pmx",
+    "dis_m3_pyr",
+    "lkv_mc_usu",
+    "rev_mc_usu",
+    "ria_ha_usu",
+    "riv_tc_usu",
+    "pop_ct_usu",
+    "dor_pc_pva",
+]
 
 # 3. HydroSHEDS System / Topological Properties (Ignored or processed separately)
 IGNORE_PROPERTIES: List[str] = [
@@ -62,7 +72,7 @@ IGNORE_PROPERTIES: List[str] = [
 # 4. Topological Navigation Attributes (Used for subbasin accounting)
 ADDITIONAL_PROPERTIES: List[str] = ["HYBAS_ID", "NEXT_DOWN", "SUB_AREA", "UP_AREA"]
 
-# 5. Upstream & Pour-Point Attributes Ignored (Per-subbasin '_s' areal properties used instead)
+# 5. Upstream Attributes Ignored (Per-subbasin '_s' areal properties used instead)
 UPSTREAM_PROPERTIES: List[str] = [
     "aet_mm_uyr", "ari_ix_uav", "cly_pc_uav", "cmi_ix_uyr", "crp_pc_use", "ele_mt_uav", "ero_kh_uav",
     "for_pc_use", "gdp_ud_usu", "gla_pc_use", "glc_pc_u01", "glc_pc_u02", "glc_pc_u03", "glc_pc_u04",
@@ -77,9 +87,6 @@ UPSTREAM_PROPERTIES: List[str] = [
     "soc_th_uav", "swc_pc_uyr", "tmp_dc_uyr", "urb_pc_use", "wet_pc_u01", "wet_pc_u02", "wet_pc_u03",
     "wet_pc_u04", "wet_pc_u05", "wet_pc_u06", "wet_pc_u07", "wet_pc_u08", "wet_pc_u09", "wet_pc_ug1",
     "wet_pc_ug2", "gad_id_smj",
-    # Excluded pour-point routing metrics
-    "dis_m3_pmn", "dis_m3_pmx", "dis_m3_pyr", "lkv_mc_usu", "rev_mc_usu",
-    "ria_ha_usu", "riv_tc_usu", "pop_ct_usu", "dor_pc_pva",
 ]
 
 # 6. HydroBASINS Continent ID prefix mapping (First digit of HYBAS_ID)
