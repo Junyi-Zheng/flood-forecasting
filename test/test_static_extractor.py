@@ -359,3 +359,59 @@ def test_batch_runner_clean_cache_flag(tmp_path):
   with pytest.raises(SystemExit):
     main(["-o", str(tmp_path / "out"), "--clean-cache", "--cache-dir", str(fake_cache)])
   assert not fake_cache.exists()
+
+
+def test_batch_runner_gcs_output_and_args(tmp_path, monkeypatch):
+  """Verifies GCS output handling and multi parent-dir argument parsing."""
+  from unittest.mock import MagicMock
+  from static_extractor.batch_runner import parse_args, run_batch_extraction
+
+  args = parse_args([
+      "-p", "gs://open-multimet/data/caravan_shapefiles/caravan/",
+      "-p", "gs://open-multimet/data/caravan_shapefiles/caravan_extensions/",
+      "-o", "gs://open-multimet/data/caravan_static_attributes/",
+      "--workers", "14",
+      "--combine",
+  ])
+  assert len(args.parent_dirs) == 2
+  assert args.output_dir == "gs://open-multimet/data/caravan_static_attributes/"
+  assert args.workers == 14
+  assert args.combine is True
+
+  # Also test space-separated multi paths for a single -p flag
+  args_multi = parse_args([
+      "-p", "dir1", "dir2", "dir3",
+      "-o", "/tmp/out",
+  ])
+  assert len(args_multi.parent_dirs) == 1
+  assert len(args_multi.parent_dirs[0]) == 3
+
+  # Test upload_to_gcs is called during run_batch_extraction when GCS output is set
+  mock_upload = MagicMock()
+  monkeypatch.setattr("static_extractor.batch_runner.upload_to_gcs", mock_upload)
+  monkeypatch.setattr("static_extractor.batch_runner.gcs_path_exists", lambda uri: False)
+
+  dummy_df = pd.DataFrame({"basin_id": ["b1"], "ele_mt_sav": [100.0]})
+  dummy_shp = tmp_path / "test.shp"
+  dummy_shp.write_text("dummy")
+
+  mock_extractor = MagicMock()
+  mock_extractor.extract_attributes_from_file.return_value = dummy_df
+  monkeypatch.setattr(
+      "static_extractor.batch_runner.StaticAttributesExtractor",
+      lambda **kwargs: mock_extractor,
+  )
+
+  results = run_batch_extraction(
+      dataset_map={"test_ds": dummy_shp},
+      output_dir="gs://open-multimet/data/caravan_static_attributes/",
+      workers=1,
+      staging_cache_dir=tmp_path / "staged",
+      combine=True,
+      resume=False,
+  )
+
+  assert "test_ds" in results
+  # Should have uploaded dataset CSV and combined CSV
+  assert mock_upload.call_count == 2
+

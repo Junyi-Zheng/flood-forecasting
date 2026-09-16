@@ -20,6 +20,7 @@ import argparse
 import logging
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -36,6 +37,87 @@ logging.basicConfig(
 logger = logging.getLogger("static_extractor.batch_runner")
 
 SUPPORTED_EXTENSIONS = [".shp", ".geojson", ".gpkg", ".json", ".parquet", ".geoparquet"]
+
+
+def gcs_path_exists(gcs_uri: str) -> bool:
+  """Checks if a GCS URI exists or contains any objects."""
+  if shutil.which("gcloud"):
+    try:
+      res = subprocess.run(
+          ["gcloud", "storage", "ls", gcs_uri],
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      return res.returncode == 0
+    except Exception:
+      pass
+  if shutil.which("gsutil"):
+    try:
+      res = subprocess.run(
+          ["gsutil", "ls", gcs_uri],
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      return res.returncode == 0
+    except Exception:
+      pass
+  return False
+
+
+def upload_to_gcs(local_path: Path, gcs_dest_uri: str) -> bool:
+  """Uploads a local file or directory to a GCS destination."""
+  gcs_dest_clean = gcs_dest_uri if gcs_dest_uri.endswith("/") else gcs_dest_uri + "/"
+  target_uri = f"{gcs_dest_clean}{local_path.name}" if local_path.is_file() else gcs_dest_clean
+  logger.info("Uploading %s to %s...", local_path, target_uri)
+
+  # 1. Try gcloud storage cp / rsync
+  if shutil.which("gcloud"):
+    try:
+      cmd = (
+          ["gcloud", "storage", "cp", str(local_path), target_uri]
+          if local_path.is_file()
+          else ["gcloud", "storage", "rsync", "-r", str(local_path), gcs_dest_clean]
+      )
+      res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+      if res.returncode == 0:
+        logger.info("Successfully uploaded %s to %s via gcloud storage.", local_path.name, target_uri)
+        return True
+      logger.debug("gcloud storage upload failed: %s. Trying gsutil...", res.stderr)
+    except Exception as e:
+      logger.debug("gcloud storage upload error: %s. Trying gsutil...", e)
+
+  # 2. Try gsutil cp / rsync
+  if shutil.which("gsutil"):
+    try:
+      cmd = (
+          ["gsutil", "cp", str(local_path), target_uri]
+          if local_path.is_file()
+          else ["gsutil", "-m", "rsync", "-r", str(local_path), gcs_dest_clean]
+      )
+      res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+      if res.returncode == 0:
+        logger.info("Successfully uploaded %s to %s via gsutil.", local_path.name, target_uri)
+        return True
+      logger.debug("gsutil upload failed: %s", res.stderr)
+    except Exception as e:
+      logger.debug("gsutil error: %s", e)
+
+  # 3. Fallback to gcsfs
+  try:
+    import gcsfs
+    fs = gcsfs.GCSFileSystem()
+    clean_target = target_uri.replace("gs://", "")
+    if local_path.is_file():
+      fs.put(str(local_path), clean_target)
+    else:
+      fs.put(str(local_path), clean_target, recursive=True)
+    logger.info("Successfully uploaded %s to %s via gcsfs.", local_path.name, target_uri)
+    return True
+  except Exception as e:
+    logger.error("Failed to upload %s to %s: %s", local_path, target_uri, e)
+    return False
 
 
 def sync_gcs_directory(gcs_uri: str, local_dest: Path) -> Path:
@@ -247,13 +329,37 @@ def run_batch_extraction(
     gridded_era5_uri: Optional[str] = None,
     gdb_path: Optional[str] = None,
     era5_cache_dir: Optional[str] = None,
+    staging_cache_dir: Optional[Path] = None,
+    gcs_output_uri: Optional[str] = None,
     min_overlap_threshold: float = 0.0,
     combine: bool = False,
     resume: bool = True,
 ) -> Dict[str, pd.DataFrame]:
   """Runs static attribute extraction across all discovered datasets."""
-  out_dir = Path(output_dir)
-  out_dir.mkdir(parents=True, exist_ok=True)
+  is_gcs_output = str(output_dir).startswith("gs://")
+  target_gcs_uri = str(output_dir) if is_gcs_output else gcs_output_uri
+
+  if is_gcs_output:
+    if staging_cache_dir is not None:
+      out_dir = staging_cache_dir.parent / "output_csvs"
+    else:
+      out_dir = Path.home() / ".cache" / "googlehydrology" / "output_csvs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "Output configured for GCS: %s (staging locally in %s)",
+        target_gcs_uri,
+        out_dir,
+    )
+  else:
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+  if resume and target_gcs_uri and gcs_path_exists(target_gcs_uri):
+    logger.info(
+        "Pre-syncing existing extracted CSVs from GCS destination %s to allow resume...",
+        target_gcs_uri,
+    )
+    sync_gcs_directory(target_gcs_uri, out_dir)
 
   logger.info("Initializing StaticAttributesExtractor (era5_source=%s)...", era5_source)
   extractor = StaticAttributesExtractor(
@@ -311,6 +417,8 @@ def run_batch_extraction(
           elapsed,
           out_file,
       )
+      if target_gcs_uri:
+        upload_to_gcs(out_file, target_gcs_uri)
       extracted_dfs[ds_name] = df
     except Exception as e:
       logger.exception("Error extracting attributes for dataset '%s': %s", ds_name, e)
@@ -330,6 +438,14 @@ def run_batch_extraction(
     combined_df = pd.concat(list(extracted_dfs.values()), axis=0)
     combined_df.to_csv(combined_path)
     logger.info("Combined CSV written: %d total rows.", len(combined_df))
+    if target_gcs_uri:
+      upload_to_gcs(combined_path, target_gcs_uri)
+
+  if target_gcs_uri:
+    logger.info(
+        "All extracted datasets uploaded to canonical GCS destination: %s",
+        target_gcs_uri,
+    )
 
   return extracted_dfs
 
@@ -343,8 +459,9 @@ def parse_args(args=None):
       "--parent-dir",
       "-p",
       action="append",
+      nargs="+",
       dest="parent_dirs",
-      help="Parent directory containing dataset subdirectories (e.g. /path/to/caravan/ or gs://...). Can specify multiple times.",
+      help="Parent directory containing dataset subdirectories (e.g. /path/to/caravan/ or gs://...). Can specify multiple times or provide multiple paths.",
   )
   parser.add_argument(
       "--input-dirs",
@@ -365,7 +482,13 @@ def parse_args(args=None):
       "-o",
       required=True,
       type=str,
-      help="Directory to save extracted attributes CSV files.",
+      help="Directory to save extracted attributes CSV files. Can be a local filesystem path (e.g. /data/caravan_static_attributes/) or a GCS bucket URI (e.g. gs://open-multimet/data/caravan_static_attributes/).",
+  )
+  parser.add_argument(
+      "--gcs-output-uri",
+      default=None,
+      type=str,
+      help="Optional GCS bucket URI to upload extracted CSVs to when --output-dir is a local path.",
   )
   parser.add_argument(
       "--workers",
@@ -448,6 +571,16 @@ def main(args=None):
   gdb_path = parsed.gdb_path or (cache_root / "hydroatlas" / "BasinATLAS_v10.gdb")
   era5_cache_dir = parsed.era5_cache_dir or (cache_root / "era5_climate")
 
+  # Flatten parent_dirs if multiple paths were passed or repeated
+  if parsed.parent_dirs:
+    flat_parents = []
+    for item in parsed.parent_dirs:
+      if isinstance(item, list):
+        flat_parents.extend(item)
+      else:
+        flat_parents.append(item)
+    parsed.parent_dirs = flat_parents
+
   try:
     if not parsed.parent_dirs and not parsed.input_dirs and not parsed.input_files:
       logger.error("Must provide at least one of --parent-dir, --input-dirs, or --input-files.")
@@ -472,17 +605,17 @@ def main(args=None):
         gridded_era5_uri=parsed.gridded_era5_uri,
         gdb_path=str(gdb_path),
         era5_cache_dir=str(era5_cache_dir),
+        staging_cache_dir=staging_cache,
+        gcs_output_uri=parsed.gcs_output_uri,
         min_overlap_threshold=parsed.min_overlap_threshold,
         combine=parsed.combine,
         resume=parsed.resume,
     )
   finally:
     if parsed.clean_cache and cache_root.exists():
-      import shutil
       logger.info("Cleaning up cache root directory %s...", cache_root)
       shutil.rmtree(cache_root, ignore_errors=True)
     elif parsed.clean_staging and staging_cache.exists():
-      import shutil
       logger.info("Cleaning up staged shapefiles directory %s...", staging_cache)
       shutil.rmtree(staging_cache, ignore_errors=True)
 
