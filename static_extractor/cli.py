@@ -93,6 +93,19 @@ def parse_args(args=None):
       help="GCS URI or path to gridded daily ERA5 Zarr store. Defaults to gs://open-multimet/data/era5_land/daily_surface.zarr.",
   )
   parser.add_argument(
+      "--cache-dir",
+      default=None,
+      type=str,
+      help="Base directory for runtime cache (defaults to ~/.cache/googlehydrology).",
+  )
+  parser.add_argument(
+      "--no-download",
+      action="store_false",
+      dest="auto_download",
+      default=True,
+      help="Disable automatic GCS downloads. Requires local files to be present.",
+  )
+  parser.add_argument(
       "--workers",
       "-w",
       default=1,
@@ -109,10 +122,14 @@ def main(args=None):
     logger.error("Input file '%s' does not exist.", input_path)
     sys.exit(1)
 
+  cache_root = Path(parsed.cache_dir) if parsed.cache_dir else Path.home() / ".cache" / "googlehydrology"
+  gdb_path = parsed.gdb_path or (cache_root / "hydroatlas" / "BasinATLAS_v10.gdb")
+  era5_cache_dir = parsed.era5_cache_dir or (cache_root / "era5_climate")
+
   logger.info("Initializing Caravan Static Attributes Extractor (ERA5 source: %s)...", parsed.era5_source)
   extractor = StaticAttributesExtractor(
-      gdb_path=parsed.gdb_path,
-      era5_cache_dir=parsed.era5_cache_dir,
+      gdb_path=str(gdb_path),
+      era5_cache_dir=str(era5_cache_dir),
       auto_download=parsed.auto_download,
       era5_source=parsed.era5_source,
       gridded_era5_uri=parsed.gridded_era5_uri,

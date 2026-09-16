@@ -379,6 +379,22 @@ def parse_args(args=None):
       help="Minimum sub-basin intersection area threshold in km².",
   )
   parser.add_argument(
+      "--cache-dir",
+      default=None,
+      type=str,
+      help="Base directory for runtime cache (defaults to ~/.cache/googlehydrology).",
+  )
+  parser.add_argument(
+      "--no-download",
+      action="store_true",
+      help="Disable automatic GCS downloads. Requires local files to be present.",
+  )
+  parser.add_argument(
+      "--clean-staging",
+      action="store_true",
+      help="Automatically clean up staged shapefiles after batch extraction finishes.",
+  )
+  parser.add_argument(
       "--combine",
       action="store_true",
       help="Also save a combined attributes_caravan_combined.csv containing all processed datasets.",
@@ -399,28 +415,41 @@ def main(args=None):
     logger.error("Must provide at least one of --parent-dir, --input-dirs, or --input-files.")
     sys.exit(1)
 
+  cache_root = Path(parsed.cache_dir) if parsed.cache_dir else Path.home() / ".cache" / "googlehydrology"
+  staging_cache = cache_root / "staged_shapefiles"
+  gdb_path = parsed.gdb_path or (cache_root / "hydroatlas" / "BasinATLAS_v10.gdb")
+  era5_cache_dir = parsed.era5_cache_dir or (cache_root / "era5_climate")
+
   dataset_map = discover_datasets(
       parent_dirs=parsed.parent_dirs,
       input_dirs=parsed.input_dirs,
       input_files=parsed.input_files,
+      staging_cache_dir=staging_cache,
   )
 
   if not dataset_map:
     logger.error("No valid dataset vector files found matching provided paths.")
     sys.exit(1)
 
-  run_batch_extraction(
-      dataset_map=dataset_map,
-      output_dir=parsed.output_dir,
-      workers=parsed.workers,
-      era5_source=parsed.era5_source,
-      gridded_era5_uri=parsed.gridded_era5_uri,
-      gdb_path=parsed.gdb_path,
-      era5_cache_dir=parsed.era5_cache_dir,
-      min_overlap_threshold=parsed.min_overlap_threshold,
-      combine=parsed.combine,
-      resume=parsed.resume,
-  )
+  try:
+    run_batch_extraction(
+        dataset_map=dataset_map,
+        output_dir=parsed.output_dir,
+        workers=parsed.workers,
+        era5_source=parsed.era5_source,
+        gridded_era5_uri=parsed.gridded_era5_uri,
+        gdb_path=str(gdb_path),
+        era5_cache_dir=str(era5_cache_dir),
+        min_overlap_threshold=parsed.min_overlap_threshold,
+        combine=parsed.combine,
+        resume=parsed.resume,
+    )
+  finally:
+    if parsed.clean_staging and staging_cache.exists():
+      import shutil
+      logger.info("Cleaning up staged shapefiles directory %s...", staging_cache)
+      shutil.rmtree(staging_cache, ignore_errors=True)
+
 
 
 if __name__ == "__main__":
