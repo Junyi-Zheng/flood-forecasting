@@ -255,4 +255,15 @@ def test_batch_runner_discovery(tmp_path):
   assert datasets["camels"].name == "camels_basin_shapes.shp"
   assert datasets["hysets"].name == "hysets.geojson"
 
+  # Test nested staging directory structure (e.g. parent/parent/dataset)
+  nested_parent = tmp_path / "staged" / "caravan" / "caravan"
+  ds_nested = nested_parent / "lamah"
+  ds_nested.mkdir(parents=True)
+  (ds_nested / "lamah_basin_shapes.shp").touch()
+
+  datasets_nested = discover_datasets(parent_dirs=[str(tmp_path / "staged" / "caravan")])
+  assert "lamah" in datasets_nested
+  assert datasets_nested["lamah"].name == "lamah_basin_shapes.shp"
+
+
 

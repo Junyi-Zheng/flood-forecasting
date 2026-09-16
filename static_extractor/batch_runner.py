@@ -42,21 +42,40 @@ def sync_gcs_directory(gcs_uri: str, local_dest: Path) -> Path:
   """Syncs a GCS directory to a local directory using gcloud storage or gsutil."""
   local_dest.mkdir(parents=True, exist_ok=True)
   logger.info("Syncing %s to local staging directory %s...", gcs_uri, local_dest)
-  
+
+  gcs_uri_clean = gcs_uri if gcs_uri.endswith("/") else gcs_uri + "/"
+
+  # Try gcloud storage rsync first (preferred)
   try:
     res = subprocess.run(
-        ["gcloud", "storage", "cp", "-r", gcs_uri, str(local_dest)],
+        ["gcloud", "storage", "rsync", "-r", gcs_uri_clean, str(local_dest)],
         capture_output=True,
         text=True,
         check=False,
     )
     if res.returncode == 0:
       return local_dest
+    logger.debug("gcloud storage rsync failed: %s. Trying gsutil...", res.stderr)
   except Exception as e:
-    logger.debug("gcloud storage failed: %s. Trying gsutil...", e)
+    logger.debug("gcloud storage rsync error: %s. Trying gsutil...", e)
 
+  # Try gsutil rsync
+  try:
+    res = subprocess.run(
+        ["gsutil", "-m", "rsync", "-r", gcs_uri_clean, str(local_dest)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if res.returncode == 0:
+      return local_dest
+    logger.debug("gsutil rsync failed: %s. Trying gcloud storage cp...", res.stderr)
+  except Exception as e:
+    logger.debug("gsutil rsync error: %s", e)
+
+  # Fallback to gcloud storage cp
   res = subprocess.run(
-      ["gsutil", "-m", "rsync", "-r", gcs_uri, str(local_dest)],
+      ["gcloud", "storage", "cp", "-r", gcs_uri_clean, str(local_dest)],
       capture_output=True,
       text=True,
       check=False,
@@ -69,7 +88,7 @@ def sync_gcs_directory(gcs_uri: str, local_dest: Path) -> Path:
 def find_vector_file_in_dir(dataset_dir: Path) -> Optional[Path]:
   """Finds the primary watershed polygon file in a dataset directory."""
   dataset_name = dataset_dir.name.lower()
-  
+
   # Check for typical Caravan naming first (e.g. camels_basin_shapes.shp)
   preferred_names = [
       f"{dataset_name}_basin_shapes.shp",
@@ -85,7 +104,11 @@ def find_vector_file_in_dir(dataset_dir: Path) -> Optional[Path]:
   # Check any shapefiles, excluding auxiliary/gauge points if basin shapes exist
   shps = list(dataset_dir.glob("*.shp"))
   if shps:
-    basin_shps = [s for s in shps if "gauge" not in s.name.lower() and "point" not in s.name.lower()]
+    basin_shps = [
+        s
+        for s in shps
+        if "gauge" not in s.name.lower() and "point" not in s.name.lower()
+    ]
     return basin_shps[0] if basin_shps else shps[0]
 
   # Check GeoJSON or GPKG
@@ -95,6 +118,27 @@ def find_vector_file_in_dir(dataset_dir: Path) -> Optional[Path]:
       return matches[0]
 
   return None
+
+
+def find_all_dataset_dirs(root_dir: Path) -> Dict[str, Path]:
+  """Recursively finds all dataset directories containing vector files under root_dir."""
+  datasets: Dict[str, Path] = {}
+  # First check if root_dir itself is a single dataset directory
+  root_vf = find_vector_file_in_dir(root_dir)
+  if root_vf:
+    datasets[root_dir.name] = root_vf
+    return datasets
+
+  for dirpath, dirnames, _ in os.walk(root_dir):
+    d = Path(dirpath)
+    if d == root_dir:
+      continue
+    vf = find_vector_file_in_dir(d)
+    if vf:
+      datasets[d.name] = vf
+      # Stop recursing into subdirectories of a discovered dataset
+      dirnames.clear()
+  return datasets
 
 
 def discover_datasets(
@@ -110,7 +154,9 @@ def discover_datasets(
   dataset_map: Dict[str, Path] = {}
 
   if staging_cache_dir is None:
-    staging_cache_dir = Path.home() / ".cache" / "googlehydrology" / "staged_shapefiles"
+    staging_cache_dir = (
+        Path.home() / ".cache" / "googlehydrology" / "staged_shapefiles"
+    )
 
   # 1. Process specific input files
   if input_files:
@@ -130,9 +176,9 @@ def discover_datasets(
         local_dir = Path(d_str)
 
       if local_dir.is_dir():
-        vf = find_vector_file_in_dir(local_dir)
-        if vf:
-          dataset_map[local_dir.name] = vf
+        found = find_all_dataset_dirs(local_dir)
+        if found:
+          dataset_map.update(found)
         else:
           logger.warning("No vector polygon file found in %s", local_dir)
 
@@ -141,21 +187,27 @@ def discover_datasets(
     for p_str in parent_dirs:
       if p_str.startswith("gs://"):
         parent_name = p_str.rstrip("/").split("/")[-1]
-        local_parent = sync_gcs_directory(p_str, staging_cache_dir / parent_name)
+        local_parent = sync_gcs_directory(
+            p_str, staging_cache_dir / parent_name
+        )
       else:
         local_parent = Path(p_str)
 
       if not local_parent.is_dir():
-        logger.warning("Parent directory %s does not exist or is not a directory.", local_parent)
+        logger.warning(
+            "Parent directory %s does not exist or is not a directory.",
+            local_parent,
+        )
         continue
 
-      for sub in sorted(local_parent.iterdir()):
-        if sub.is_dir() and not sub.name.startswith("."):
-          vf = find_vector_file_in_dir(sub)
-          if vf:
-            dataset_map[sub.name] = vf
-          else:
-            logger.debug("No vector polygon file found in subdirectory %s", sub)
+      found = find_all_dataset_dirs(local_parent)
+      if found:
+        dataset_map.update(found)
+      else:
+        logger.warning(
+            "No dataset vector files found under parent directory %s",
+            local_parent,
+        )
 
   return dataset_map
 
