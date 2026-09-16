@@ -44,6 +44,7 @@ from tqdm.auto import tqdm
 from static_extractor.config import (
     ATTRIBUTE_DEFINITIONS,
     DEFAULT_ERA5_SOURCE,
+    GCS_BENCHMARK_URI,
     MAJORITY_PROPERTIES,
     POUR_POINT_PROPERTIES,
     get_default_era5_cache_dir,
@@ -326,7 +327,7 @@ def run_benchmark(
   if not ds_path.exists():
     print(f"Benchmark dataset not found locally at {ds_path}. Downloading from GCS...")
     ds_path.parent.mkdir(parents=True, exist_ok=True)
-    gcs_src = "gs://open-multimet/data/benchmarks/benchmark_basins_500.parquet"
+    gcs_src = GCS_BENCHMARK_URI
     try:
       import shutil
       import subprocess
@@ -336,7 +337,8 @@ def run_benchmark(
         from google.cloud import storage
         client = storage.Client()
         bucket = client.bucket("open-multimet")
-        blob = bucket.blob("data/benchmarks/benchmark_basins_500.parquet")
+        blob_path = gcs_src.replace("gs://open-multimet/", "")
+        blob = bucket.blob(blob_path)
         blob.download_to_filename(str(ds_path))
       print(f"Successfully downloaded benchmark dataset to {ds_path}")
     except Exception as e:

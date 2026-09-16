@@ -439,3 +439,126 @@ def test_batch_runner_progress_and_quiet_logging(tmp_path):
   assert logging.getLogger().level == logging.DEBUG
 
 
+def test_export_subdataset_partitioned_files(tmp_path):
+  """Tests partitioning of extracted attributes into HydroATLAS, Caravan, and Parquet tables."""
+  from static_extractor.batch_runner import export_subdataset_partitioned_files
+
+  ds_dir = tmp_path / "camels"
+  ds_dir.mkdir()
+  coords_file = ds_dir / "coordinates.csv"
+  coords_file.write_text(
+      "gauge_id,gauge_lat,gauge_lon,original_id\n"
+      "camels_01,45.0,-70.0,ORIG_01\n"
+      "camels_02,46.0,-71.0,ORIG_02\n"
+  )
+  dummy_shp = ds_dir / "camels_basin_shapes.shp"
+  dummy_shp.write_text("dummy")
+
+  df = pd.DataFrame(
+      {
+          "basin_area": [100.0, 200.0],
+          "ele_mt_sav": [500.0, 600.0],
+          "p_mean": [3.5, 4.0],
+          "pet_mean": [2.5, 2.8],
+          "aridity": [0.7, 0.8],
+      },
+      index=["camels_01", "camels_02"],
+  )
+  df.index.name = "gauge_id"
+
+  out_sub = tmp_path / "out" / "camels"
+  res = export_subdataset_partitioned_files(
+      df=df,
+      ds_name="camels",
+      output_sub_dir=out_sub,
+      vector_path=dummy_shp,
+  )
+
+  assert res["hydroatlas"].exists()
+  assert res["caravan"].exists()
+  assert res["parquet"].exists()
+
+  df_hydro = pd.read_csv(res["hydroatlas"], index_col=0)
+  assert "basin_area" in df_hydro.columns
+  assert "ele_mt_sav" in df_hydro.columns
+  assert "p_mean" not in df_hydro.columns
+  assert "gauge_lat" not in df_hydro.columns
+
+  df_caravan = pd.read_csv(res["caravan"], index_col=0)
+  assert "p_mean" in df_caravan.columns
+  assert "pet_mean" in df_caravan.columns
+  assert "aridity" in df_caravan.columns
+  assert "gauge_lat" in df_caravan.columns
+  assert "gauge_lon" in df_caravan.columns
+  assert df_caravan.loc["camels_01", "gauge_lat"] == 45.0
+
+  df_parquet = pd.read_parquet(res["parquet"])
+  assert len(df_parquet) == 2
+  assert "basin_area" in df_parquet.columns
+  assert "p_mean" in df_parquet.columns
+  assert "gauge_lat" in df_parquet.columns
+
+
+def test_batch_runner_partitioned_caravan_new(tmp_path, monkeypatch):
+  """Verifies that caravan-new paths automatically trigger subdataset partitioning and uploads."""
+  from unittest.mock import MagicMock
+  from static_extractor.batch_runner import run_batch_extraction
+
+  uploaded_uris = []
+  def mock_upload(local_file, gcs_dest):
+    uploaded_uris.append((Path(local_file).name, gcs_dest))
+    return True
+
+  monkeypatch.setattr("static_extractor.batch_runner.upload_to_gcs", mock_upload)
+  monkeypatch.setattr("static_extractor.batch_runner.gcs_path_exists", lambda uri: False)
+
+  ds_dir = tmp_path / "camels"
+  ds_dir.mkdir()
+  (ds_dir / "coordinates.csv").write_text("gauge_id,gauge_lat,gauge_lon\ncamels_01,44.0,-68.0\n")
+  dummy_shp = ds_dir / "camels_basin_shapes.shp"
+  dummy_shp.write_text("dummy")
+
+  dummy_df = pd.DataFrame(
+      {"basin_area": [150.0], "ele_mt_sav": [300.0], "p_mean": [3.2]},
+      index=["camels_01"],
+  )
+  dummy_df.index.name = "gauge_id"
+
+  mock_extractor = MagicMock()
+  mock_extractor.extract_attributes_from_file.return_value = dummy_df
+  monkeypatch.setattr(
+      "static_extractor.batch_runner.StaticAttributesExtractor",
+      lambda **kwargs: mock_extractor,
+  )
+
+  # 1. Run extraction into caravan-new target GCS path
+  results = run_batch_extraction(
+      dataset_map={"camels": dummy_shp},
+      output_dir="gs://open-multimet/caravan-new/caravan-original/attributes/",
+      workers=1,
+      staging_cache_dir=tmp_path / "staged",
+      resume=True,
+  )
+
+  assert "camels" in results
+  # Verify 3 files were uploaded to gs://open-multimet/caravan-new/caravan-original/attributes/camels/
+  uploaded_filenames = [u[0] for u in uploaded_uris]
+  assert "attributes_hydroatlas_camels.csv" in uploaded_filenames
+  assert "attributes_caravan_camels.csv" in uploaded_filenames
+  assert "attributes_camels.parquet" in uploaded_filenames
+  for _, dest in uploaded_uris:
+    assert dest.endswith("attributes/camels/")
+
+  # 2. Re-running with resume=True should skip camels (parquet already exists locally)
+  prev_upload_count = len(uploaded_uris)
+  results_resume = run_batch_extraction(
+      dataset_map={"camels": dummy_shp},
+      output_dir="gs://open-multimet/caravan-new/caravan-original/attributes/",
+      workers=1,
+      staging_cache_dir=tmp_path / "staged",
+      resume=True,
+  )
+  assert "camels" in results_resume
+  assert len(uploaded_uris) == prev_upload_count
+
+

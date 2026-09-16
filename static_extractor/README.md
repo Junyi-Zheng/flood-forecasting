@@ -32,17 +32,18 @@ The extractor enforces a **single, authoritative source of truth** hosted on Goo
 ### 1. Authoritative GCS Data Stores
 | Dataset | Canonical GCS URI | Description |
 | :--- | :--- | :--- |
-| **HydroATLAS Geodatabase** | `gs://open-multimet/data/hydroatlas/BasinATLAS_v10.gdb/` | Full global ESRI FileGDB containing the `BasinATLAS_v10_lev12` layer (5.5 GiB, 1,034,083 Level 12 subcatchments). |
-| **ERA5-Land Climate Tables** | `gs://open-multimet/data/hydroatlas/era5_climate/` | 9 continental precomputed Level 12 climate tables (`af`, `ar`, `as`, `au`, `eu`, `gr`, `na`, `sa`, `si`; 1,034,027 basins). |
-| **HydroATLAS Tabular Parquet** | `gs://open-multimet/data/hydroatlas/hydro_atlas_lev12.parquet` | Complete pre-indexed tabular HydroATLAS Level 12 attributes (233 MiB). |
-| **Gridded ERA5-Land Zarr** | `gs://open-multimet/data/era5_land/daily_surface.zarr` | Archived daily surface gridded ERA5-Land dataset used when `--era5-source gridded` is selected. |
+| **HydroATLAS Geodatabase** | `gs://open-multimet/ancillary-data/hydroatlas/BasinATLAS_v10.gdb/` | Full global ESRI FileGDB containing the `BasinATLAS_v10_lev12` layer (5.5 GiB, 1,034,083 Level 12 subcatchments). |
+| **ERA5-Land Climate Tables** | `gs://open-multimet/ancillary-data/hydroatlas/era5_climate/` | 9 continental precomputed Level 12 climate tables (`af`, `ar`, `as`, `au`, `eu`, `gr`, `na`, `sa`, `si`; 1,034,027 basins). |
+| **HydroATLAS Tabular Parquet** | `gs://open-multimet/ancillary-data/hydroatlas/hydro_atlas_lev12.parquet` | Complete pre-indexed tabular HydroATLAS Level 12 attributes (233 MiB). |
+| **Gridded ERA5-Land Zarr** | `gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr` | Archived daily surface gridded ERA5-Land dataset used when `--era5-source gridded` is selected. |
+| **Benchmark Catchment Dataset** | `gs://open-multimet/ancillary-data/benchmarks/benchmark_basins_500.parquet` | Reference benchmark dataset of 500 diverse global catchments for regression testing. |
 
 ### 2. Local Runtime Staging Cache
 To enable fast random spatial reads by GDAL/`pyogrio`, the extractor stages data locally during runtime execution:
 - **GDB Staging Path:** `~/.cache/googlehydrology/hydroatlas/BasinATLAS_v10.gdb`
 - **ERA5 Staging Path:** `~/.cache/googlehydrology/era5_climate/`
 
-> **Note on Storage Architecture:** Local directories are strictly used as temporary execution caches. If the local staging cache is empty, the extractor automatically downloads required files from `gs://open-multimet/data/hydroatlas/`. No manual downloads or external local data stores are required.
+> **Note on Storage Architecture:** Local directories are strictly used as temporary execution caches. If the local staging cache is empty, the extractor automatically downloads required files from `gs://open-multimet/ancillary-data/hydroatlas/`. No manual downloads or external local data stores are required.
 
 ---
 
@@ -84,7 +85,7 @@ extract-caravan-static \
     --output /path/to/attributes.csv \
     --id-column gauge_id \
     --era5-source gridded \
-    --gridded-era5-uri gs://open-multimet/data/era5_land/daily_surface.zarr \
+    --gridded-era5-uri gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr \
     --min-overlap-threshold 0.5
 ```
 
@@ -96,7 +97,7 @@ extract-caravan-static \
 - `--era5-source`: Choice of ERA5 climate attribute calculation method (`hybas` or `gridded`, default: `hybas`):
   - `hybas`: Fast area-weighted aggregation of precomputed HydroSHEDS Level 12 sub-basin statistics (~20 ms/basin).
   - `gridded`: Recalculates climate indices directly on the fly from 40-year daily surface gridded ERA5-Land data on GCS.
-- `--gridded-era5-uri`: Custom GCS URI or local path for the daily surface ERA5 Zarr store (defaults to `gs://open-multimet/data/era5_land/daily_surface.zarr`).
+- `--gridded-era5-uri`: Custom GCS URI or local path for the daily surface ERA5 Zarr store (defaults to `gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr`).
 - `--min-overlap-threshold`: Minimum sub-basin overlap area in $\text{km}^2$ to filter boundary slivers (default `0.0`).
 - `--gdb-path`, `-g`: Optional override path to local `BasinATLAS_v10.gdb` (defaults to runtime cache).
 - `--era5-cache-dir`: Optional override directory for ERA5 climate files (defaults to runtime cache).
@@ -105,7 +106,7 @@ extract-caravan-static \
 
 ## 🚀 Multi-Dataset Static Batch Runner (`extract-caravan-static-batch`)
 
-For batch processing static attributes across multiple Caravan datasets in one command, the package provides `extract-caravan-static-batch` (alias `extract-static-attributes-batch`). It specifically extracts the static HydroATLAS physiographic attributes and ERA5 climate indices. It accepts parent directories, directory lists, or direct GCS URIs, auto-discovers watershed shapefiles, supports `--workers` parallelization, and outputs separate CSVs per dataset plus an optional combined CSV:
+For batch processing static attributes across multiple Caravan datasets in one command, the package provides `extract-caravan-static-batch` (alias `extract-static-attributes-batch`). It specifically extracts the static HydroATLAS physiographic attributes and ERA5 climate indices. It accepts parent directories, directory lists, or direct GCS URIs, auto-discovers watershed shapefiles, supports `--workers` parallelization, and outputs partitioned files matching the canonical `caravan-new` schema (`attributes_hydroatlas_<ds>.csv`, `attributes_caravan_<ds>.csv`, `attributes_<ds>.parquet`):
 
 ```bash
 # 1. Run all datasets within a parent directory (e.g. caravan/ containing camels/, hysets/, etc.)
@@ -115,12 +116,11 @@ extract-caravan-static-batch \
     --workers 32 \
     --combine
 
-# 2. Run directly from Google Cloud Storage parent URI
+# 2. Run directly from Google Cloud Storage parent URI into canonical caravan-new layout
 extract-caravan-static-batch \
-    --parent-dir gs://open-multimet/data/caravan_shapefiles/caravan/ \
-    --output-dir /path/to/extracted_csvs/ \
-    --workers 32 \
-    --combine
+    --parent-dir gs://open-multimet/caravan-new/caravan-original/shapefiles/ \
+    --output-dir gs://open-multimet/caravan-new/caravan-original/attributes/ \
+    --workers 16
 
 # 3. Run for an explicit list of dataset directories
 extract-caravan-static-batch \
@@ -133,10 +133,11 @@ extract-caravan-static-batch \
 - `--parent-dir`, `-p`: Parent directory containing dataset subdirectories (local path or `gs://...`). Can be passed multiple times.
 - `--input-dirs`, `-d`: Explicit list of dataset directories.
 - `--input-files`, `-f`: Explicit list of vector files (`.shp`, `.geojson`, `.gpkg`).
-- `--output-dir`, `-o`: Output directory for generated CSV files (`attributes_caravan_<dataset>.csv`).
+- `--output-dir`, `-o`: Output directory for generated files. Automatically creates partitioned subdataset folders (`attributes_hydroatlas_<ds>.csv`, `attributes_caravan_<ds>.csv`, `attributes_<ds>.parquet`) when writing to `caravan-new` or when `--partition-outputs` is set.
+- `--partition-outputs`, `-P`: Explicitly enable partitioned subdataset outputs.
 - `--workers`, `-w`: Number of parallel worker processes.
 - `--era5-source`: `hybas` (default) or `gridded`.
-- `--combine`: Generates an aggregated `attributes_caravan_combined.csv` merging all datasets.
+- `--combine`: Generates aggregated combined tables (`attributes_caravan_combined.csv` and `attributes_combined.parquet`) merging all datasets.
 - `--no-resume`: Disables resume (by default, already completed datasets are skipped).
 
 ---

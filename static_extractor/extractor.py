@@ -184,9 +184,9 @@ class StaticAttributesExtractor:
     """Initializes the StaticAttributesExtractor.
 
     Authoritative data sources are strictly:
-      - HydroATLAS: gs://open-multimet/data/hydroatlas/BasinATLAS_v10.gdb/
-      - ERA5 Climate (hybas): gs://open-multimet/data/hydroatlas/era5_climate/
-      - ERA5 Gridded (gridded): gs://open-multimet/data/era5_land/daily_surface.zarr
+      - HydroATLAS: gs://open-multimet/ancillary-data/hydroatlas/BasinATLAS_v10.gdb/
+      - ERA5 Climate (hybas): gs://open-multimet/ancillary-data/hydroatlas/era5_climate/
+      - ERA5 Gridded (gridded): gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr
 
     Args:
       gdb_path: Path to runtime staging BasinATLAS_v10.gdb directory. If None,

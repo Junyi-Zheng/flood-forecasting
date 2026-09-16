@@ -61,6 +61,125 @@ def setup_logging(verbose: bool = False) -> None:
 
 SUPPORTED_EXTENSIONS = [".shp", ".geojson", ".gpkg", ".json", ".parquet", ".geoparquet"]
 
+CARAVAN_CLIMATE_INDICES = {
+    "p_mean",
+    "pet_mean",
+    "aridity",
+    "frac_snow",
+    "moisture_index",
+    "seasonality",
+    "high_prec_freq",
+    "high_prec_dur",
+    "low_prec_freq",
+    "low_prec_dur",
+    "aridity_ERA5_LAND",
+    "aridity_FAO_PM",
+    "pet_mean_ERA5_LAND",
+    "pet_mean_FAO_PM",
+    "moisture_index_ERA5_LAND",
+    "moisture_index_FAO_PM",
+    "seasonality_ERA5_LAND",
+    "seasonality_FAO_PM",
+}
+
+
+def export_subdataset_partitioned_files(
+    df: pd.DataFrame,
+    ds_name: str,
+    output_sub_dir: Path,
+    vector_path: Optional[Path] = None,
+) -> Dict[str, Path]:
+  """Exports extracted attributes into partitioned HydroATLAS, Caravan, and Parquet files.
+
+  Schema per subdataset directory:
+    - attributes_hydroatlas_<ds>.csv (~198 HydroATLAS attributes)
+    - attributes_caravan_<ds>.csv (long-term hydrologic & climate indices + gauge_lat/lon)
+    - attributes_other_<ds>.csv (provider metadata, if present)
+    - attributes_<ds>.parquet (single unified table merging all above tables on gauge_id)
+  """
+  output_sub_dir.mkdir(parents=True, exist_ok=True)
+  df_work = df.copy()
+
+  # 1. Attach gauge_lat and gauge_lon from coordinates.csv if available
+  coords_file = None
+  if vector_path is not None:
+    candidate = vector_path.parent / "coordinates.csv"
+    if candidate.exists():
+      coords_file = candidate
+    else:
+      candidate2 = (
+          vector_path.parent.parent.parent
+          / "shapefiles"
+          / ds_name
+          / "coordinates.csv"
+      )
+      if candidate2.exists():
+        coords_file = candidate2
+
+  if coords_file is not None and coords_file.exists():
+    try:
+      coords_df = pd.read_csv(coords_file)
+      if "gauge_id" in coords_df.columns:
+        coords_df = coords_df.set_index("gauge_id")
+      for col in ["gauge_lat", "gauge_lon"]:
+        if col in coords_df.columns and col not in df_work.columns:
+          df_work[col] = df_work.index.map(coords_df[col])
+    except Exception as e:
+      logger.debug("Could not attach coordinates from %s: %s", coords_file, e)
+
+  # 2. Partition columns
+  caravan_cols = [
+      c for c in df_work.columns
+      if c in CARAVAN_CLIMATE_INDICES or c in ["gauge_lat", "gauge_lon"]
+  ]
+  hydro_cols = [c for c in df_work.columns if c not in caravan_cols]
+
+  # Sort HydroATLAS columns, ensuring basin_area is first
+  sorted_hydro = sorted(hydro_cols)
+  if "basin_area" in sorted_hydro:
+    sorted_hydro.remove("basin_area")
+    sorted_hydro = ["basin_area"] + sorted_hydro
+
+  sorted_caravan = sorted(caravan_cols)
+
+  df_hydro = df_work[sorted_hydro].sort_index()
+  df_caravan = df_work[sorted_caravan].sort_index()
+
+  hydro_path = output_sub_dir / f"attributes_hydroatlas_{ds_name}.csv"
+  caravan_path = output_sub_dir / f"attributes_caravan_{ds_name}.csv"
+  df_hydro.to_csv(hydro_path)
+  df_caravan.to_csv(caravan_path)
+
+  # 3. Check for attributes_other_<ds>.csv
+  other_path = output_sub_dir / f"attributes_other_{ds_name}.csv"
+  df_other = None
+  if not other_path.exists() and vector_path is not None:
+    cand_other = vector_path.parent / f"attributes_other_{ds_name}.csv"
+    if cand_other.exists():
+      shutil.copy(cand_other, other_path)
+  if other_path.exists():
+    try:
+      df_other = pd.read_csv(other_path, index_col=0)
+    except Exception as e:
+      logger.debug("Could not read existing %s: %s", other_path, e)
+
+  # 4. Construct unified table and save to Parquet
+  df_unified = df_hydro.join(df_caravan, how="outer")
+  if df_other is not None:
+    df_unified = df_unified.join(df_other, how="left")
+
+  parquet_path = output_sub_dir / f"attributes_{ds_name}.parquet"
+  df_unified.to_parquet(parquet_path)
+
+  result = {
+      "hydroatlas": hydro_path,
+      "caravan": caravan_path,
+      "parquet": parquet_path,
+  }
+  if other_path.exists():
+    result["other"] = other_path
+  return result
+
 
 def gcs_path_exists(gcs_uri: str) -> bool:
   """Checks if a GCS URI exists or contains any objects."""
@@ -318,7 +437,11 @@ def discover_datasets(
   if parent_dirs:
     for p_str in parent_dirs:
       if p_str.startswith("gs://"):
-        parent_name = p_str.rstrip("/").split("/")[-1]
+        parts = [p for p in p_str.rstrip("/").split("/") if p and p != "gs:"]
+        if len(parts) >= 2 and parts[-1] in ["shapefiles", "shapefiles-rederived", "data"]:
+          parent_name = f"{parts[-2]}_{parts[-1]}"
+        else:
+          parent_name = parts[-1] if parts else "parent"
         local_parent = sync_gcs_directory(
             p_str, staging_cache_dir / parent_name
         )
@@ -358,10 +481,16 @@ def run_batch_extraction(
     combine: bool = False,
     resume: bool = True,
     show_progress: bool = True,
+    partition_outputs: Optional[bool] = None,
 ) -> Dict[str, pd.DataFrame]:
   """Runs static attribute extraction across all discovered datasets."""
   is_gcs_output = str(output_dir).startswith("gs://")
   target_gcs_uri = str(output_dir) if is_gcs_output else gcs_output_uri
+
+  if partition_outputs is None:
+    out_str = str(output_dir)
+    gcs_str = str(gcs_output_uri) if gcs_output_uri else ""
+    partition_outputs = ("caravan-new" in out_str) or ("caravan-new" in gcs_str)
 
   if is_gcs_output:
     if staging_cache_dir is not None:
@@ -370,9 +499,10 @@ def run_batch_extraction(
       out_dir = Path.home() / ".cache" / "googlehydrology" / "output_csvs"
     out_dir.mkdir(parents=True, exist_ok=True)
     logger.debug(
-        "Output configured for GCS: %s (staging locally in %s)",
+        "Output configured for GCS: %s (staging locally in %s, partition_outputs=%s)",
         target_gcs_uri,
         out_dir,
+        partition_outputs,
     )
   else:
     out_dir = Path(output_dir)
@@ -380,7 +510,7 @@ def run_batch_extraction(
 
   if resume and target_gcs_uri and gcs_path_exists(target_gcs_uri):
     logger.debug(
-        "Pre-syncing existing extracted CSVs from GCS destination %s to allow resume...",
+        "Pre-syncing existing extracted files from GCS destination %s to allow resume...",
         target_gcs_uri,
     )
     sync_gcs_directory(target_gcs_uri, out_dir)
@@ -409,20 +539,43 @@ def run_batch_extraction(
   )
 
   for i, (ds_name, vector_path) in enumerate(dataset_map.items(), start=1):
-    out_file = out_dir / f"attributes_caravan_{ds_name}.csv"
-    if resume and out_file.exists() and out_file.stat().st_size > 500:
-      df = pd.read_csv(out_file, index_col=0)
-      extracted_dfs[ds_name] = df
-      dataset_pbar.set_postfix_str(f"Skipped {ds_name} (already done)")
-      dataset_pbar.update(1)
-      continue
+    if partition_outputs:
+      sub_dir = out_dir / ds_name
+      parquet_file = sub_dir / f"attributes_{ds_name}.parquet"
+      hydro_file = sub_dir / f"attributes_hydroatlas_{ds_name}.csv"
+      caravan_file = sub_dir / f"attributes_caravan_{ds_name}.csv"
+      if resume and (
+          (parquet_file.exists() and parquet_file.stat().st_size > 500)
+          or (hydro_file.exists() and caravan_file.exists() and hydro_file.stat().st_size > 500)
+      ):
+        try:
+          if parquet_file.exists():
+            df = pd.read_parquet(parquet_file)
+          else:
+            df = pd.read_csv(hydro_file, index_col=0).join(
+                pd.read_csv(caravan_file, index_col=0), how="outer"
+            )
+          extracted_dfs[ds_name] = df
+          dataset_pbar.set_postfix_str(f"Skipped {ds_name} (already done)")
+          dataset_pbar.update(1)
+          continue
+        except Exception:
+          pass
+    else:
+      out_file = out_dir / f"attributes_caravan_{ds_name}.csv"
+      if resume and out_file.exists() and out_file.stat().st_size > 500:
+        df = pd.read_csv(out_file, index_col=0)
+        extracted_dfs[ds_name] = df
+        dataset_pbar.set_postfix_str(f"Skipped {ds_name} (already done)")
+        dataset_pbar.update(1)
+        continue
 
     dataset_pbar.set_postfix_str(f"Extracting {ds_name}...")
     t0 = time.time()
     try:
       df = extractor.extract_attributes_from_file(
           input_path=vector_path,
-          output_csv_path=out_file,
+          output_csv_path=out_file if not partition_outputs else None,
           min_overlap_threshold=min_overlap_threshold,
           era5_source=era5_source,
           workers=workers,
@@ -430,16 +583,38 @@ def run_batch_extraction(
           dataset_name=ds_name,
       )
       elapsed = time.time() - t0
-      logger.debug(
-          "Successfully completed '%s': %d basins extracted in %.1f seconds (saved to %s)",
-          ds_name,
-          len(df),
-          elapsed,
-          out_file,
-      )
-      if target_gcs_uri:
-        upload_to_gcs(out_file, target_gcs_uri)
-      extracted_dfs[ds_name] = df
+
+      if partition_outputs:
+        exported_files = export_subdataset_partitioned_files(
+            df=df,
+            ds_name=ds_name,
+            output_sub_dir=out_dir / ds_name,
+            vector_path=vector_path,
+        )
+        if target_gcs_uri:
+          target_ds_gcs = f"{target_gcs_uri.rstrip('/')}/{ds_name}/"
+          for f_path in exported_files.values():
+            upload_to_gcs(f_path, target_ds_gcs)
+        extracted_dfs[ds_name] = pd.read_parquet(exported_files["parquet"])
+        logger.debug(
+            "Successfully completed '%s' partitioned: %d basins in %.1f seconds (saved to %s)",
+            ds_name,
+            len(df),
+            elapsed,
+            out_dir / ds_name,
+        )
+      else:
+        if target_gcs_uri:
+          upload_to_gcs(out_file, target_gcs_uri)
+        extracted_dfs[ds_name] = df
+        logger.debug(
+            "Successfully completed '%s': %d basins extracted in %.1f seconds (saved to %s)",
+            ds_name,
+            len(df),
+            elapsed,
+            out_file,
+        )
+
       dataset_pbar.set_postfix_str(f"Done {ds_name} ({len(df):,} basins, {elapsed:.1f}s)")
     except Exception as e:
       logger.exception("Error extracting attributes for dataset '%s': %s", ds_name, e)
@@ -462,9 +637,17 @@ def run_batch_extraction(
     logger.debug("Combining all %d datasets into %s...", len(extracted_dfs), combined_path)
     combined_df = pd.concat(list(extracted_dfs.values()), axis=0)
     combined_df.to_csv(combined_path)
-    logger.debug("Combined CSV written: %d total rows.", len(combined_df))
     if target_gcs_uri:
       upload_to_gcs(combined_path, target_gcs_uri)
+
+    if partition_outputs:
+      combined_parquet = out_dir / "attributes_combined.parquet"
+      combined_df.to_parquet(combined_parquet)
+      if target_gcs_uri:
+        upload_to_gcs(combined_parquet, target_gcs_uri)
+      logger.debug("Combined CSV & Parquet written: %d total rows.", len(combined_df))
+    else:
+      logger.debug("Combined CSV written: %d total rows.", len(combined_df))
 
   if target_gcs_uri:
     logger.debug(
@@ -478,7 +661,10 @@ def run_batch_extraction(
         f"in {total_elapsed:.1f}s ({total_elapsed/60:.1f} min)."
     )
     if combine and extracted_dfs:
-      print(f"✓ Combined CSV generated: {combined_path.name} ({len(combined_df):,} total rows)")
+      if partition_outputs:
+        print(f"✓ Combined files generated: {combined_path.name} & {combined_parquet.name} ({len(combined_df):,} total rows)")
+      else:
+        print(f"✓ Combined CSV generated: {combined_path.name} ({len(combined_df):,} total rows)")
     if target_gcs_uri:
       print(f"✓ Results stored in canonical GCS destination: {target_gcs_uri}")
     else:
@@ -519,7 +705,14 @@ def parse_args(args=None):
       "-o",
       required=True,
       type=str,
-      help="Directory to save extracted attributes CSV files. Can be a local filesystem path (e.g. /data/caravan_static_attributes/) or a GCS bucket URI (e.g. gs://open-multimet/data/caravan_static_attributes/).",
+      help="Directory to save extracted attributes. Can be a local filesystem path (e.g. /data/attributes/) or a GCS bucket URI (e.g. gs://open-multimet/caravan-new/caravan-original/attributes/).",
+  )
+  parser.add_argument(
+      "--partition-outputs",
+      "-P",
+      action=argparse.BooleanOptionalAction,
+      default=None,
+      help="Partition output attributes per subdataset directory into attributes_hydroatlas_<ds>.csv, attributes_caravan_<ds>.csv, and attributes_<ds>.parquet matching caravan-new schema.",
   )
   parser.add_argument(
       "--gcs-output-uri",
@@ -668,6 +861,7 @@ def main(args=None):
         combine=parsed.combine,
         resume=parsed.resume,
         show_progress=parsed.show_progress,
+        partition_outputs=parsed.partition_outputs,
     )
   finally:
     if parsed.clean_cache and cache_root.exists():

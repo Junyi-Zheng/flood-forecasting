@@ -103,11 +103,12 @@ CONTINENT_MAP: Mapping[int, str] = {
 }
 
 # 7. Cloud Storage Canonical Data Stores (Authoritative single source of truth)
-GCS_HYDROATLAS_BUCKET: str = "gs://open-multimet/data/hydroatlas"
+GCS_HYDROATLAS_BUCKET: str = "gs://open-multimet/ancillary-data/hydroatlas"
 GCS_HYDROATLAS_GDB_URI: str = f"{GCS_HYDROATLAS_BUCKET}/BasinATLAS_v10.gdb"
 GCS_ERA5_CLIMATE_URI: str = f"{GCS_HYDROATLAS_BUCKET}/era5_climate"
 GCS_PARQUET_URI: str = f"{GCS_HYDROATLAS_BUCKET}/hydro_atlas_lev12.parquet"
-GCS_ERA5_GRIDDED_ZARR_URI: str = "gs://open-multimet/data/era5_land/daily_surface.zarr"
+GCS_ERA5_GRIDDED_ZARR_URI: str = "gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr"
+GCS_BENCHMARK_URI: str = "gs://open-multimet/ancillary-data/benchmarks/benchmark_basins_500.parquet"
 DEFAULT_ERA5_SOURCE: str = "hybas"  # Options: "hybas" (precalculated subbasins), "gridded" (recalculated on the fly from archived gridded Zarr)
 
 # Curated Attribute Definitions with Metadata
@@ -189,7 +190,7 @@ ATTRIBUTE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
 def get_default_gdb_path() -> Path:
   """Returns the local runtime staging path for BasinATLAS_v10.gdb.
 
-  The authoritative data store is strictly gs://open-multimet/data/hydroatlas/BasinATLAS_v10.gdb.
+  The authoritative data store is strictly gs://open-multimet/ancillary-data/hydroatlas/BasinATLAS_v10.gdb.
   This local directory serves strictly as a temporary runtime staging cache.
   """
   return (
@@ -204,7 +205,7 @@ def get_default_gdb_path() -> Path:
 def get_default_era5_cache_dir() -> Path:
   """Returns the local runtime staging directory for continental ERA5 climate index files.
 
-  The authoritative data store is strictly gs://open-multimet/data/hydroatlas/era5_climate/.
+  The authoritative data store is strictly gs://open-multimet/ancillary-data/hydroatlas/era5_climate/.
   This local directory serves strictly as a temporary runtime staging cache.
   """
   target = Path.home() / ".cache" / "googlehydrology" / "era5_climate"

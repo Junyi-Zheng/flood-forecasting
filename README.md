@@ -155,7 +155,7 @@ This repository includes the official Caravan static attribute extraction engine
 👉 **Full Documentation, Methodology, and API Reference:** See the [Caravan Static Attributes Extractor Documentation](static_extractor/README.md).
 
 ### **Quick Highlights**
-- **Canonical Data Stores:** Hosted in Google Cloud Storage at [`gs://open-multimet/data/hydroatlas/`](gs://open-multimet/data/hydroatlas/) and [`gs://open-multimet/data/era5_land/daily_surface.zarr`](gs://open-multimet/data/era5_land/daily_surface.zarr). Automatically staged locally on demand.
+- **Canonical Data Stores:** Hosted in Google Cloud Storage at [`gs://open-multimet/ancillary-data/hydroatlas/`](gs://open-multimet/ancillary-data/hydroatlas/) and [`gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr`](gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr). Automatically staged locally on demand.
 - **Strict Caravan Spatial Aggregation:** Area-weighted averaging for continuous attributes, area-weighted majority voting for discrete categorical classes, and downstream topological routing (`NEXT_DOWN`) for pour-point properties.
 - **Global 40-Year ERA5-Land Climate Metrics (1981–2020):** FAO-56 Penman-Monteith PET, aridity index, snow fraction, Knoben annual moisture and seasonality indices, and Addor extreme precipitation metrics.
 - **Dual Climate Calculation Modes:** Support for ultra-fast precalculated HydroSHEDS Level 12 sub-basin aggregation (`--era5-source hybas`, default, ~20 ms/basin) or recalculating directly on the fly from archived gridded ERA5 daily surface Zarr (`--era5-source gridded`).
@@ -168,12 +168,11 @@ extract-caravan-static \
     --input /path/to/watershed_polygons.geojson \
     --output /path/to/extracted_caravan_attributes.csv
 
-# Multi-dataset batch runner for static attributes (parent dirs or directory lists)
+# Multi-dataset batch runner for static attributes (into canonical caravan-new layout)
 extract-caravan-static-batch \
-    --parent-dir gs://open-multimet/data/caravan_shapefiles/caravan/ \
-    --output-dir /path/to/extracted_csvs/ \
-    --workers 32 \
-    --combine
+    --parent-dir gs://open-multimet/caravan-new/caravan-original/shapefiles/ \
+    --output-dir gs://open-multimet/caravan-new/caravan-original/attributes/ \
+    --workers 16
 ```
 
 ### **Quick Python API**

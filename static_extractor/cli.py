@@ -90,7 +90,7 @@ def parse_args(args=None):
       "--gridded-era5-uri",
       default=None,
       type=str,
-      help="GCS URI or path to gridded daily ERA5 Zarr store. Defaults to gs://open-multimet/data/era5_land/daily_surface.zarr.",
+      help="GCS URI or path to gridded daily ERA5 Zarr store. Defaults to gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr.",
   )
   parser.add_argument(
       "--cache-dir",

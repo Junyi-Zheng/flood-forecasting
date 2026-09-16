@@ -303,7 +303,7 @@ def compute_caravan_climate_metrics(
 class ERA5ClimateLoader:
   """Loads and aggregates Level 12 precomputed ERA5 climate indices.
 
-  Checks local cache, then downloads from GCS (gs://open-multimet/data/hydroatlas/era5_climate),
+  Checks local cache, then downloads from GCS (gs://open-multimet/ancillary-data/hydroatlas/era5_climate),
   with internal fallback to CNS.
   """
 
@@ -496,7 +496,7 @@ class ERA5GriddedExtractor:
 
     Args:
       zarr_uri: Optional GCS URI or local path to gridded daily surface ERA5 Zarr store.
-        Defaults to gs://open-multimet/data/era5_land/daily_surface.zarr.
+        Defaults to gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr.
     """
     self.zarr_uri = zarr_uri or GCS_ERA5_GRIDDED_ZARR_URI
     self._ds = None
