@@ -35,7 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("static_extractor.batch_runner")
 
-SUPPORTED_EXTENSIONS = [".shp", ".geojson", ".gpkg", ".json"]
+SUPPORTED_EXTENSIONS = [".shp", ".geojson", ".gpkg", ".json", ".parquet", ".geoparquet"]
 
 
 def sync_gcs_directory(gcs_uri: str, local_dest: Path) -> Path:
@@ -95,6 +95,8 @@ def find_vector_file_in_dir(dataset_dir: Path) -> Optional[Path]:
       f"{dataset_name}_basins.shp",
       f"{dataset_name}.shp",
       f"{dataset_name}.geojson",
+      f"{dataset_name}.geoparquet",
+      f"{dataset_name}.parquet",
   ]
   for pref in preferred_names:
     p = dataset_dir / pref
@@ -111,8 +113,8 @@ def find_vector_file_in_dir(dataset_dir: Path) -> Optional[Path]:
     ]
     return basin_shps[0] if basin_shps else shps[0]
 
-  # Check GeoJSON or GPKG
-  for ext in [".geojson", ".gpkg", ".json"]:
+  # Check GeoJSON, GPKG, or GeoParquet
+  for ext in [".geojson", ".gpkg", ".json", ".parquet", ".geoparquet"]:
     matches = list(dataset_dir.glob(f"*{ext}"))
     if matches:
       return matches[0]
@@ -123,6 +125,18 @@ def find_vector_file_in_dir(dataset_dir: Path) -> Optional[Path]:
 def find_all_dataset_dirs(root_dir: Path) -> Dict[str, Path]:
   """Recursively finds all dataset directories containing vector files under root_dir."""
   datasets: Dict[str, Path] = {}
+  # Check if root_dir directly contains multiple vector files (e.g. continental geoparquet files)
+  direct_vfs = [
+      f for f in root_dir.iterdir()
+      if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
+      and "gauge" not in f.name.lower() and "point" not in f.name.lower()
+  ]
+  if len(direct_vfs) > 1:
+    for vf in sorted(direct_vfs):
+      ds_key = f"{root_dir.name}_{vf.stem}" if root_dir.name not in ["staged_shapefiles", "data", "shapes"] else vf.stem
+      datasets[ds_key] = vf
+    return datasets
+
   # First check if root_dir itself is a single dataset directory
   root_vf = find_vector_file_in_dir(root_dir)
   if root_vf:
@@ -133,6 +147,19 @@ def find_all_dataset_dirs(root_dir: Path) -> Dict[str, Path]:
     d = Path(dirpath)
     if d == root_dir:
       continue
+    # Check if this subdirectory has multiple vector files directly
+    d_vfs = [
+        f for f in d.iterdir()
+        if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
+        and "gauge" not in f.name.lower() and "point" not in f.name.lower()
+    ]
+    if len(d_vfs) > 1:
+      for vf in sorted(d_vfs):
+        ds_key = f"{d.name}_{vf.stem}" if d.name not in ["staged_shapefiles", "data", "shapes"] else vf.stem
+        datasets[ds_key] = vf
+      dirnames.clear()
+      continue
+
     vf = find_vector_file_in_dir(d)
     if vf:
       datasets[d.name] = vf
@@ -395,6 +422,11 @@ def parse_args(args=None):
       help="Automatically clean up staged shapefiles after batch extraction finishes.",
   )
   parser.add_argument(
+      "--clean-cache",
+      action="store_true",
+      help="Automatically clean up the entire local cache directory (~/.cache/googlehydrology) after extraction finishes.",
+  )
+  parser.add_argument(
       "--combine",
       action="store_true",
       help="Also save a combined attributes_caravan_combined.csv containing all processed datasets.",
@@ -411,27 +443,27 @@ def parse_args(args=None):
 
 def main(args=None):
   parsed = parse_args(args)
-  if not parsed.parent_dirs and not parsed.input_dirs and not parsed.input_files:
-    logger.error("Must provide at least one of --parent-dir, --input-dirs, or --input-files.")
-    sys.exit(1)
-
   cache_root = Path(parsed.cache_dir) if parsed.cache_dir else Path.home() / ".cache" / "googlehydrology"
   staging_cache = cache_root / "staged_shapefiles"
   gdb_path = parsed.gdb_path or (cache_root / "hydroatlas" / "BasinATLAS_v10.gdb")
   era5_cache_dir = parsed.era5_cache_dir or (cache_root / "era5_climate")
 
-  dataset_map = discover_datasets(
-      parent_dirs=parsed.parent_dirs,
-      input_dirs=parsed.input_dirs,
-      input_files=parsed.input_files,
-      staging_cache_dir=staging_cache,
-  )
-
-  if not dataset_map:
-    logger.error("No valid dataset vector files found matching provided paths.")
-    sys.exit(1)
-
   try:
+    if not parsed.parent_dirs and not parsed.input_dirs and not parsed.input_files:
+      logger.error("Must provide at least one of --parent-dir, --input-dirs, or --input-files.")
+      sys.exit(1)
+
+    dataset_map = discover_datasets(
+        parent_dirs=parsed.parent_dirs,
+        input_dirs=parsed.input_dirs,
+        input_files=parsed.input_files,
+        staging_cache_dir=staging_cache,
+    )
+
+    if not dataset_map:
+      logger.error("No valid dataset vector files found matching provided paths.")
+      sys.exit(1)
+
     run_batch_extraction(
         dataset_map=dataset_map,
         output_dir=parsed.output_dir,
@@ -445,7 +477,11 @@ def main(args=None):
         resume=parsed.resume,
     )
   finally:
-    if parsed.clean_staging and staging_cache.exists():
+    if parsed.clean_cache and cache_root.exists():
+      import shutil
+      logger.info("Cleaning up cache root directory %s...", cache_root)
+      shutil.rmtree(cache_root, ignore_errors=True)
+    elif parsed.clean_staging and staging_cache.exists():
       import shutil
       logger.info("Cleaning up staged shapefiles directory %s...", staging_cache)
       shutil.rmtree(staging_cache, ignore_errors=True)

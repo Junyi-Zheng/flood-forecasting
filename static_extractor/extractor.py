@@ -682,7 +682,10 @@ class StaticAttributesExtractor:
     Returns:
       Pandas DataFrame with extracted attributes, indexed by gauge_id.
     """
-    gdf = gpd.read_file(input_path)
+    if str(input_path).endswith((".parquet", ".geoparquet")):
+      gdf = gpd.read_parquet(input_path)
+    else:
+      gdf = gpd.read_file(input_path)
     if gdf.crs is not None and not gdf.crs.is_geographic:
       gdf = gdf.to_crs(epsg=4326)
 

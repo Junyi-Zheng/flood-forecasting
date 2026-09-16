@@ -136,7 +136,9 @@ def compute_continuous_metrics(
         "r2": np.nan,
         "mae": np.nan,
         "rmse": np.nan,
+        "max_abs_error": np.nan,
         "med_rel_error_pct": np.nan,
+        "max_rel_error_pct": np.nan,
     }
 
   std_t = float(np.std(y_t))
@@ -157,8 +159,10 @@ def compute_continuous_metrics(
       spearman_rho_val = pearson_r_val
 
   diff = y_p - y_t
-  mae = float(np.mean(np.abs(diff)))
+  abs_diff = np.abs(diff)
+  mae = float(np.mean(abs_diff))
   rmse = float(np.sqrt(np.mean(diff**2)))
+  max_abs_error = float(np.max(abs_diff))
 
   ss_res = float(np.sum(diff**2))
   ss_tot = float(np.sum((y_t - np.mean(y_t)) ** 2))
@@ -169,11 +173,12 @@ def compute_continuous_metrics(
 
   non_zero = np.abs(y_t) > 1e-5
   if np.any(non_zero):
-    med_rel_err = float(
-        np.median(np.abs(diff[non_zero]) / np.abs(y_t[non_zero])) * 100.0
-    )
+    rel_errors = (abs_diff[non_zero] / np.abs(y_t[non_zero])) * 100.0
+    med_rel_err = float(np.median(rel_errors))
+    max_rel_err = float(np.max(rel_errors))
   else:
     med_rel_err = 0.0 if np.allclose(y_t, y_p, atol=1e-5) else 100.0
+    max_rel_err = 0.0 if np.allclose(y_t, y_p, atol=1e-5) else 100.0
 
   return {
       "n": n,
@@ -182,7 +187,9 @@ def compute_continuous_metrics(
       "r2": round(float(r2_val), 5),
       "mae": round(mae, 4),
       "rmse": round(rmse, 4),
+      "max_abs_error": round(max_abs_error, 4),
       "med_rel_error_pct": round(med_rel_err, 3),
+      "max_rel_error_pct": round(max_rel_err, 3),
   }
 
 
@@ -457,7 +464,9 @@ def run_benchmark(
           "r2": np.nan,
           "mae": np.nan,
           "rmse": np.nan,
+          "max_abs_error": np.nan,
           "med_rel_error_pct": np.nan,
+          "max_rel_error_pct": np.nan,
           "accuracy_pct": cat_res["accuracy_pct"],
           "classes_count": cat_res["classes_count"],
       })
@@ -473,7 +482,9 @@ def run_benchmark(
           "r2": cont_res["r2"],
           "mae": cont_res["mae"],
           "rmse": cont_res["rmse"],
+          "max_abs_error": cont_res["max_abs_error"],
           "med_rel_error_pct": cont_res["med_rel_error_pct"],
+          "max_rel_error_pct": cont_res["max_rel_error_pct"],
           "accuracy_pct": np.nan,
           "classes_count": np.nan,
       })
@@ -482,6 +493,8 @@ def run_benchmark(
 
   # Calculate per-basin mean relative error and categorical accuracy
   basin_mean_errs = []
+  basin_max_errs = []
+  basin_worst_attrs = []
   basin_cat_accs = []
   cont_attr_names = [a for a in attr_names if a not in MAJORITY_PROPERTIES]
   cat_attr_names = [a for a in attr_names if a in MAJORITY_PROPERTIES]
@@ -493,14 +506,25 @@ def run_benchmark(
 
     # Continuous relative errors
     rel_errs = []
+    max_err_val = -1.0
+    max_err_attr = None
     for a in cont_attr_names:
       ref_v = float(row_ref[f"ref_{a}"])
       pred_v = float(ext_dict.get(a, np.nan))
       if not np.isnan(ref_v) and not np.isnan(pred_v) and abs(ref_v) > 1e-5:
-        rel_errs.append(abs(pred_v - ref_v) / abs(ref_v) * 100.0)
+        err = abs(pred_v - ref_v) / abs(ref_v) * 100.0
+        rel_errs.append(err)
+        if err > max_err_val:
+          max_err_val = err
+          max_err_attr = a
+
     basin_mean_errs.append(
         round(float(np.median(rel_errs)), 2) if rel_errs else np.nan
     )
+    basin_max_errs.append(
+        round(float(max_err_val), 2) if max_err_val >= 0 else np.nan
+    )
+    basin_worst_attrs.append(max_err_attr or "none")
 
     # Categorical matches
     matches = 0
@@ -517,6 +541,8 @@ def run_benchmark(
     )
 
   basin_metrics_df["median_attr_rel_err_pct"] = basin_mean_errs
+  basin_metrics_df["max_attr_rel_err_pct"] = basin_max_errs
+  basin_metrics_df["worst_attribute"] = basin_worst_attrs
   basin_metrics_df["categorical_acc_pct"] = basin_cat_accs
 
   # Summarize Overall Benchmark Performance
@@ -533,25 +559,49 @@ def run_benchmark(
   pct_r_95 = float((cont_metrics["pearson_r"] >= 0.95).mean() * 100.0)
   pct_r_90 = float((cont_metrics["pearson_r"] >= 0.90).mean() * 100.0)
   mean_cat_acc = float(cat_metrics["accuracy_pct"].mean())
+
   med_area_err = float(basin_metrics_df["abs_area_err_pct"].median())
+  max_area_err = float(basin_metrics_df["abs_area_err_pct"].max())
+  worst_area_basin = str(
+      basin_metrics_df.loc[basin_metrics_df["abs_area_err_pct"].idxmax()][
+          "gauge_id"
+      ]
+  )
+
+  med_attr_err = float(cont_metrics["med_rel_error_pct"].median())
+  max_attr_err = float(cont_metrics["max_rel_error_pct"].max())
+  worst_attr_name = str(
+      cont_metrics.loc[cont_metrics["max_rel_error_pct"].idxmax()]["attribute"]
+  )
+
+  max_abs_err_val = float(cont_metrics["max_abs_error"].max())
+  worst_abs_attr_name = str(
+      cont_metrics.loc[cont_metrics["max_abs_error"].idxmax()]["attribute"]
+  )
 
   print("\n" + "=" * 80)
   print("GLOBAL CARAVAN STATIC ATTRIBUTE EXTRACTION BENCHMARK RESULTS")
   print("=" * 80)
-  print(f"Total Basins Evaluated    : {total_basins}")
-  print(f"Total Wall-Clock Time      : {total_wall_time:.2f}s ({time_per_basin:.3f}s / basin)")
-  print(f"Successful Extractions     : {successful} / {total_basins} (100.0%)")
-  print(f"Total Attributes Checked   : {len(attr_metrics_df)} (196 HydroATLAS + 14 Caravan ERA5)")
+  print(f"Total Basins Evaluated      : {total_basins}")
+  print(f"Total Wall-Clock Time        : {total_wall_time:.2f}s ({time_per_basin:.3f}s / basin)")
+  print(f"Successful Extractions       : {successful} / {total_basins} (100.0%)")
+  print(f"Total Attributes Checked     : {len(attr_metrics_df)} (196 HydroATLAS + 14 Caravan ERA5)")
   print(f"Continuous Attributes Mean r : {mean_r:.4f}")
   print(f"Continuous Attributes Med r  : {median_r:.5f}")
-  print(f"Attributes with r >= 0.99  : {pct_r_99:.1f}% ({int((cont_metrics['pearson_r'] >= 0.99).sum())} / {len(cont_metrics)})")
-  print(f"Attributes with r >= 0.95  : {pct_r_95:.1f}%")
-  print(f"Attributes with r >= 0.90  : {pct_r_90:.1f}%")
-  print(f"Categorical Majority Acc   : {mean_cat_acc:.2f}%")
-  print(f"Median Basin Area Error    : {med_area_err:.2f}%")
+  print(f"Attributes with r >= 0.99    : {pct_r_99:.1f}% ({int((cont_metrics['pearson_r'] >= 0.99).sum())} / {len(cont_metrics)})")
+  print(f"Attributes with r >= 0.95    : {pct_r_95:.1f}%")
+  print(f"Attributes with r >= 0.90    : {pct_r_90:.1f}%")
+  print(f"Categorical Majority Acc     : {mean_cat_acc:.2f}%")
+  print(f"Median Basin Area Error      : {med_area_err:.2f}%")
+  print(f"Maximum Basin Area Error     : {max_area_err:.2f}% (Basin: {worst_area_basin})")
+  print(f"Median Attribute Rel Error   : {med_attr_err:.2f}%")
+  print(f"Maximum Attribute Rel Error  : {max_attr_err:.2f}% (Attribute: {worst_attr_name})")
+  print(f"Maximum Absolute Error       : {max_abs_err_val:.4f} (Attribute: {worst_abs_attr_name})")
 
   # 1. Performance by Thematic Domain Table
-  cat_table_headers = ["Thematic Domain", "Attributes", "Mean r", "Median r", "r >= 0.99 %", "Med Rel Err %"]
+  cat_table_headers = [
+      "Thematic Domain", "Attributes", "Mean r", "Median r", "r >= 0.99 %", "Med Rel Err %", "Max Rel Err %", "Max Abs Err"
+  ]
   cat_table_rows = []
   for dom in THEMATIC_DOMAINS:
     sub = cont_metrics[cont_metrics["category"] == dom]
@@ -560,36 +610,57 @@ def run_benchmark(
       dom_med_r = f"{sub['pearson_r'].median():.5f}"
       dom_pct_99 = f"{(sub['pearson_r'] >= 0.99).mean() * 100:.1f}%"
       dom_med_err = f"{sub['med_rel_error_pct'].median():.2f}%"
+      dom_max_err = f"{sub['max_rel_error_pct'].max():.2f}%"
+      dom_max_abs = f"{sub['max_abs_error'].max():.2f}"
     else:
       dom_mean_r = "N/A"
       dom_med_r = "N/A"
       dom_pct_99 = "N/A"
       dom_med_err = "N/A"
-    cat_table_rows.append([dom, len(attr_metrics_df[attr_metrics_df["category"] == dom]), dom_mean_r, dom_med_r, dom_pct_99, dom_med_err])
+      dom_max_err = "N/A"
+      dom_max_abs = "N/A"
+    cat_table_rows.append([
+        dom,
+        len(attr_metrics_df[attr_metrics_df["category"] == dom]),
+        dom_mean_r,
+        dom_med_r,
+        dom_pct_99,
+        dom_med_err,
+        dom_max_err,
+        dom_max_abs,
+    ])
   print_table(cat_table_headers, cat_table_rows, "PERFORMANCE BY THEMATIC DOMAIN")
 
   # 2. Performance by Dataset / Region Table
-  ds_table_headers = ["Dataset", "Basins", "Med Area Err %", "Med Attr Err %", "Cat Acc %", "Mean Time"]
+  ds_table_headers = [
+      "Dataset", "Basins", "Med Area Err %", "Max Area Err %", "Med Attr Err %", "Max Attr Err %", "Cat Acc %", "Mean Time"
+  ]
   ds_table_rows = []
   for ds, grp in basin_metrics_df.groupby("dataset"):
     n = len(grp)
     med_area = f"{grp['abs_area_err_pct'].median():.2f}%"
-    med_attr_err = f"{grp['median_attr_rel_err_pct'].median():.2f}%"
+    max_area = f"{grp['abs_area_err_pct'].max():.2f}%"
+    med_attr_err_str = f"{grp['median_attr_rel_err_pct'].median():.2f}%"
+    max_attr_err_str = f"{grp['max_attr_rel_err_pct'].max():.2f}%"
     cat_acc = f"{grp['categorical_acc_pct'].mean():.1f}%"
     mean_t = f"{grp['elapsed_sec'].mean():.3f}s"
-    ds_table_rows.append([str(ds), n, med_area, med_attr_err, cat_acc, mean_t])
+    ds_table_rows.append([str(ds), n, med_area, max_area, med_attr_err_str, max_attr_err_str, cat_acc, mean_t])
   print_table(ds_table_headers, ds_table_rows, "PERFORMANCE BY DATASET / REGION")
 
   # 3. Performance by Size Tier Table
-  tier_table_headers = ["Size Tier", "Basins", "Med Area Err %", "Med Attr Err %", "Cat Acc %", "Mean Time"]
+  tier_table_headers = [
+      "Size Tier", "Basins", "Med Area Err %", "Max Area Err %", "Med Attr Err %", "Max Attr Err %", "Cat Acc %", "Mean Time"
+  ]
   tier_table_rows = []
   for tier, grp in basin_metrics_df.groupby("size_tier"):
     n = len(grp)
     med_area = f"{grp['abs_area_err_pct'].median():.2f}%"
-    med_attr_err = f"{grp['median_attr_rel_err_pct'].median():.2f}%"
+    max_area = f"{grp['abs_area_err_pct'].max():.2f}%"
+    med_attr_err_str = f"{grp['median_attr_rel_err_pct'].median():.2f}%"
+    max_attr_err_str = f"{grp['max_attr_rel_err_pct'].max():.2f}%"
     cat_acc = f"{grp['categorical_acc_pct'].mean():.1f}%"
     mean_t = f"{grp['elapsed_sec'].mean():.3f}s"
-    tier_table_rows.append([str(tier), n, med_area, med_attr_err, cat_acc, mean_t])
+    tier_table_rows.append([str(tier), n, med_area, max_area, med_attr_err_str, max_attr_err_str, cat_acc, mean_t])
   print_table(tier_table_headers, tier_table_rows, "PERFORMANCE BY BASIN SIZE TIER")
 
   # 4. Discrete Majority Classification Accuracy Table
@@ -603,6 +674,24 @@ def run_benchmark(
         f"{row['accuracy_pct']:.2f}%",
     ])
   print_table(maj_table_headers, maj_table_rows, "DISCRETE CATEGORICAL CLASSIFICATION ACCURACY")
+
+  # 5. Top 10 Attributes by Maximum Relative Error
+  max_err_headers = [
+      "Attribute", "Thematic Domain", "Pearson r", "Med Rel Err %", "Max Rel Err %", "Max Abs Err", "MAE"
+  ]
+  top_max_err = cont_metrics.sort_values(by="max_rel_error_pct", ascending=False).head(10)
+  max_err_rows = []
+  for _, r in top_max_err.iterrows():
+    max_err_rows.append([
+        r["attribute"],
+        r["category"],
+        f"{r['pearson_r']:.4f}",
+        f"{r['med_rel_error_pct']:.2f}%",
+        f"{r['max_rel_error_pct']:.2f}%",
+        f"{r['max_abs_error']:.4f}",
+        f"{r['mae']:.4f}",
+    ])
+  print_table(max_err_headers, max_err_rows, "TOP 10 ATTRIBUTES BY MAXIMUM RELATIVE ERROR")
   print("=" * 80)
 
   # Output Reports and CSVs
@@ -632,6 +721,13 @@ def run_benchmark(
       pct_r_90=pct_r_90,
       mean_cat_acc=mean_cat_acc,
       med_area_err=med_area_err,
+      max_area_err=max_area_err,
+      worst_area_basin=worst_area_basin,
+      med_attr_err=med_attr_err,
+      max_attr_err=max_attr_err,
+      worst_attr_name=worst_attr_name,
+      max_abs_err_val=max_abs_err_val,
+      worst_abs_attr_name=worst_abs_attr_name,
       cat_table_headers=cat_table_headers,
       cat_table_rows=cat_table_rows,
       ds_table_headers=ds_table_headers,
@@ -640,6 +736,8 @@ def run_benchmark(
       tier_table_rows=tier_table_rows,
       maj_table_headers=maj_table_headers,
       maj_table_rows=maj_table_rows,
+      max_err_headers=max_err_headers,
+      max_err_rows=max_err_rows,
       cont_metrics=cont_metrics,
   )
   print(f"Generated comprehensive Markdown report: {report_md_path}")
@@ -660,6 +758,13 @@ def _generate_markdown_report(
     pct_r_90: float,
     mean_cat_acc: float,
     med_area_err: float,
+    max_area_err: float,
+    worst_area_basin: str,
+    med_attr_err: float,
+    max_attr_err: float,
+    worst_attr_name: str,
+    max_abs_err_val: float,
+    worst_abs_attr_name: str,
     cat_table_headers: List[str],
     cat_table_rows: List[List[Any]],
     ds_table_headers: List[str],
@@ -668,6 +773,8 @@ def _generate_markdown_report(
     tier_table_rows: List[List[Any]],
     maj_table_headers: List[str],
     maj_table_rows: List[List[Any]],
+    max_err_headers: List[str],
+    max_err_rows: List[List[Any]],
     cont_metrics: pd.DataFrame,
 ):
   """Writes formatted GitHub markdown report."""
@@ -692,6 +799,10 @@ def _generate_markdown_report(
       f"- **Attributes with r >= 0.90**: **{pct_r_90:.1f}%**",
       f"- **Categorical Majority Accuracy**: **{mean_cat_acc:.2f}%**",
       f"- **Median Basin Drainage Area Discrepancy**: **{med_area_err:.2f}%**",
+      f"- **Maximum Basin Drainage Area Discrepancy**: **{max_area_err:.2f}%** (Basin: `{worst_area_basin}`)",
+      f"- **Median Attribute Relative Error**: **{med_attr_err:.2f}%**",
+      f"- **Maximum Attribute Relative Error**: **{max_attr_err:.2f}%** (Attribute: `{worst_attr_name}`)",
+      f"- **Maximum Absolute Error**: **{max_abs_err_val:.4f}** (Attribute: `{worst_abs_attr_name}`)",
       "",
       "## 2. Performance by Thematic Domain",
       "",
@@ -712,9 +823,9 @@ def _generate_markdown_report(
       "## 6. Top 10 Most Accurately Extracted Continuous Attributes",
       "",
       _to_markdown_table(
-          ["Attribute", "Thematic Domain", "Pearson r", "R^2", "Median Rel Err %"],
+          ["Attribute", "Thematic Domain", "Pearson r", "R^2", "Med Rel Err %", "Max Rel Err %", "Max Abs Err"],
           [
-              [r["attribute"], r["category"], f"{r['pearson_r']:.5f}", f"{r['r2']:.5f}", f"{r['med_rel_error_pct']:.2f}%"]
+              [r["attribute"], r["category"], f"{r['pearson_r']:.5f}", f"{r['r2']:.5f}", f"{r['med_rel_error_pct']:.2f}%", f"{r['max_rel_error_pct']:.2f}%", f"{r['max_abs_error']:.4f}"]
               for _, r in top_10.iterrows()
           ],
       ),
@@ -722,12 +833,16 @@ def _generate_markdown_report(
       "## 7. Bottom 10 Continuous Attributes by Correlation",
       "",
       _to_markdown_table(
-          ["Attribute", "Thematic Domain", "Pearson r", "R^2", "Median Rel Err %"],
+          ["Attribute", "Thematic Domain", "Pearson r", "R^2", "Med Rel Err %", "Max Rel Err %", "Max Abs Err"],
           [
-              [r["attribute"], r["category"], f"{r['pearson_r']:.5f}", f"{r['r2']:.5f}", f"{r['med_rel_error_pct']:.2f}%"]
+              [r["attribute"], r["category"], f"{r['pearson_r']:.5f}", f"{r['r2']:.5f}", f"{r['med_rel_error_pct']:.2f}%", f"{r['max_rel_error_pct']:.2f}%", f"{r['max_abs_error']:.4f}"]
               for _, r in bottom_10.iterrows()
           ],
       ),
+      "",
+      "## 8. Top 10 Attributes by Maximum Relative Error",
+      "",
+      _to_markdown_table(max_err_headers, max_err_rows),
       "",
   ]
 

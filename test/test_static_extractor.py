@@ -280,7 +280,9 @@ def test_benchmark_metrics_continuous():
   assert res["r2"] > 0.999
   assert res["mae"] < 0.2
   assert res["rmse"] < 0.2
+  assert res["max_abs_error"] == 0.2
   assert res["med_rel_error_pct"] < 1.0
+  assert res["max_rel_error_pct"] < 1.5
 
 
 def test_benchmark_metrics_categorical():
@@ -327,13 +329,33 @@ def test_benchmark_run_mini(tmp_path):
 
   assert len(basin_df) == 4
   assert len(attr_df) == 210
+  assert "max_abs_error" in attr_df.columns
+  assert "max_rel_error_pct" in attr_df.columns
+  assert "max_attr_rel_err_pct" in basin_df.columns
+  assert "worst_attribute" in basin_df.columns
   assert (tmp_path / "benchmark_report.md").exists()
   assert (tmp_path / "benchmark_attribute_metrics.csv").exists()
   assert (tmp_path / "benchmark_basin_metrics.csv").exists()
   report_text = (tmp_path / "benchmark_report.md").read_text()
   assert "Executive Summary" in report_text
   assert "Total Basins Evaluated" in report_text
+  assert "Maximum Basin Drainage Area Discrepancy" in report_text
+  assert "Maximum Attribute Relative Error" in report_text
 
 
+def test_batch_runner_clean_cache_flag(tmp_path):
+  """Verifies that --clean-cache removes cache_root after batch execution."""
+  from static_extractor.batch_runner import parse_args, main
+  fake_cache = tmp_path / "cache_dir"
+  fake_cache.mkdir(parents=True, exist_ok=True)
+  (fake_cache / "staged_shapefiles").mkdir(parents=True, exist_ok=True)
+  (fake_cache / "test.txt").write_text("hello")
 
+  # Test parser recognition
+  args = parse_args(["-o", str(tmp_path / "out"), "--clean-cache", "--cache-dir", str(fake_cache)])
+  assert args.clean_cache is True
 
+  # Verify cleanup behavior in main finally block
+  with pytest.raises(SystemExit):
+    main(["-o", str(tmp_path / "out"), "--clean-cache", "--cache-dir", str(fake_cache)])
+  assert not fake_cache.exists()

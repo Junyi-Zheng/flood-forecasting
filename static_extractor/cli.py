@@ -106,6 +106,11 @@ def parse_args(args=None):
       help="Disable automatic GCS downloads. Requires local files to be present.",
   )
   parser.add_argument(
+      "--clean-cache",
+      action="store_true",
+      help="Automatically clean up the entire local cache directory (~/.cache/googlehydrology) after extraction finishes.",
+  )
+  parser.add_argument(
       "--workers",
       "-w",
       default=1,
@@ -126,34 +131,40 @@ def main(args=None):
   gdb_path = parsed.gdb_path or (cache_root / "hydroatlas" / "BasinATLAS_v10.gdb")
   era5_cache_dir = parsed.era5_cache_dir or (cache_root / "era5_climate")
 
-  logger.info("Initializing Caravan Static Attributes Extractor (ERA5 source: %s)...", parsed.era5_source)
-  extractor = StaticAttributesExtractor(
-      gdb_path=str(gdb_path),
-      era5_cache_dir=str(era5_cache_dir),
-      auto_download=parsed.auto_download,
-      era5_source=parsed.era5_source,
-      gridded_era5_uri=parsed.gridded_era5_uri,
-  )
+  try:
+    logger.info("Initializing Caravan Static Attributes Extractor (ERA5 source: %s)...", parsed.era5_source)
+    extractor = StaticAttributesExtractor(
+        gdb_path=str(gdb_path),
+        era5_cache_dir=str(era5_cache_dir),
+        auto_download=parsed.auto_download,
+        era5_source=parsed.era5_source,
+        gridded_era5_uri=parsed.gridded_era5_uri,
+    )
 
-  logger.info(
-      "Extracting static attributes from '%s' (workers=%d)...",
-      input_path,
-      parsed.workers,
-  )
-  df = extractor.extract_attributes_from_file(
-      input_path=input_path,
-      output_csv_path=parsed.output,
-      id_column=parsed.id_column,
-      min_overlap_threshold=parsed.min_overlap_threshold,
-      workers=parsed.workers,
-  )
+    logger.info(
+        "Extracting static attributes from '%s' (workers=%d)...",
+        input_path,
+        parsed.workers,
+    )
+    df = extractor.extract_attributes_from_file(
+        input_path=input_path,
+        output_csv_path=parsed.output,
+        id_column=parsed.id_column,
+        min_overlap_threshold=parsed.min_overlap_threshold,
+        workers=parsed.workers,
+    )
 
-  logger.info(
-      "Successfully extracted %d attributes for %d catchments. Saved to %s",
-      df.shape[1],
-      df.shape[0],
-      parsed.output,
-  )
+    logger.info(
+        "Successfully extracted %d attributes for %d catchments. Saved to %s",
+        df.shape[1],
+        df.shape[0],
+        parsed.output,
+    )
+  finally:
+    if parsed.clean_cache and cache_root.exists():
+      import shutil
+      logger.info("Cleaning up cache root directory %s...", cache_root)
+      shutil.rmtree(cache_root, ignore_errors=True)
 
 
 if __name__ == "__main__":
