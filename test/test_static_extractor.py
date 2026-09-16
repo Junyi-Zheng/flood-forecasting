@@ -317,9 +317,10 @@ def test_benchmark_attribute_categorization():
 def test_benchmark_run_mini(tmp_path):
   """Tests executing a mini benchmark run with 4 basins."""
   from static_extractor.benchmark import run_benchmark, DEFAULT_BENCHMARK_PATH
+  from static_extractor.config import get_default_gdb_path
 
-  if not DEFAULT_BENCHMARK_PATH.exists():
-    pytest.skip("Benchmark parquet not found.")
+  if not DEFAULT_BENCHMARK_PATH.exists() or not get_default_gdb_path().exists():
+    pytest.skip("BasinATLAS GDB or benchmark dataset not cached locally (skipping live GCS download in CI).")
 
   attr_df, basin_df = run_benchmark(
       samples=4,
