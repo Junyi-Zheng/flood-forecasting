@@ -147,7 +147,7 @@ def test_extractor_wabash_basins_matching_reference():
   with tempfile.TemporaryDirectory() as tmpdir:
     out_csv = Path(tmpdir) / "test_attributes.csv"
     df = extractor.extract_attributes_from_file(
-        wabash_geojson, output_csv_path=out_csv
+        wabash_geojson, output_csv_path=out_csv, workers=2
     )
 
     assert df.shape[0] == 5

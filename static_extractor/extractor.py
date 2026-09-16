@@ -256,7 +256,10 @@ class StaticAttributesExtractor:
     ]
 
     # Initialize ERA5 climate loaders
-    self.era5_loader = ERA5ClimateLoader(cache_dir=era5_cache_dir)
+    self.era5_cache_dir = (
+        Path(era5_cache_dir) if era5_cache_dir else get_default_era5_cache_dir()
+    )
+    self.era5_loader = ERA5ClimateLoader(cache_dir=self.era5_cache_dir)
     self.gridded_extractor = ERA5GriddedExtractor(zarr_uri=self.gridded_era5_uri)
 
   def _read_subbasins_in_bbox(
@@ -705,7 +708,12 @@ class StaticAttributesExtractor:
           len(tasks),
           workers,
       )
-      with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+      import concurrent.futures
+      import multiprocessing as mp
+      ctx = mp.get_context("spawn")
+      with concurrent.futures.ProcessPoolExecutor(
+          max_workers=workers, mp_context=ctx
+      ) as executor:
         results = list(executor.map(_worker_extract_polygon, worker_args))
     else:
       results = []
