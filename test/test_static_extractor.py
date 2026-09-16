@@ -562,3 +562,79 @@ def test_batch_runner_partitioned_caravan_new(tmp_path, monkeypatch):
   assert len(uploaded_uris) == prev_upload_count
 
 
+def test_batch_runner_preserve_caravan_dirs(tmp_path, monkeypatch):
+  """Verifies that --preserve-caravan-dirs partitions output per the contract into <collection>/attributes/<subdataset>/."""
+  from unittest.mock import MagicMock
+  from static_extractor.batch_runner import parse_args, run_batch_extraction
+
+  args = parse_args(["-o", "gs://open-multimet/caravan-new/", "--preserve-caravan-dirs"])
+  assert args.preserve_caravan_dirs is True
+
+  uploaded_uris = []
+  def mock_upload(local_file, gcs_dest):
+    uploaded_uris.append((Path(local_file).name, gcs_dest))
+    return True
+
+  monkeypatch.setattr("static_extractor.batch_runner.upload_to_gcs", mock_upload)
+  monkeypatch.setattr("static_extractor.batch_runner.gcs_path_exists", lambda uri: False)
+
+  # Setup 3 dummy datasets spanning all 3 collections
+  # 1. camels (caravan-original)
+  # 2. camelsde (caravan-extensions)
+  # 3. camelsfr (google-internal)
+  dataset_map = {}
+  for ds_name in ["camels", "camelsde", "camelsfr"]:
+    d = tmp_path / ds_name
+    d.mkdir()
+    (d / "coordinates.csv").write_text(f"gauge_id,gauge_lat,gauge_lon\n{ds_name}_01,45.0,-70.0\n")
+    shp = d / f"{ds_name}_basin_shapes.shp"
+    shp.write_text("dummy")
+    dataset_map[ds_name] = shp
+
+  mock_extractor = MagicMock()
+  def mock_extract(input_path, **kwargs):
+    ds = Path(input_path).stem.replace("_basin_shapes", "")
+    df = pd.DataFrame(
+        {"basin_area": [100.0], "ele_mt_sav": [400.0], "p_mean": [3.0]},
+        index=[f"{ds}_01"],
+    )
+    df.index.name = "gauge_id"
+    return df
+
+  mock_extractor.extract_attributes_from_file.side_effect = mock_extract
+  monkeypatch.setattr(
+      "static_extractor.batch_runner.StaticAttributesExtractor",
+      lambda **kwargs: mock_extractor,
+  )
+
+  results = run_batch_extraction(
+      dataset_map=dataset_map,
+      output_dir="gs://open-multimet/caravan-new/",
+      preserve_caravan_dirs=True,
+      workers=1,
+      staging_cache_dir=tmp_path / "staged",
+      resume=False,
+  )
+
+  assert len(results) == 3
+  # Check uploaded destinations
+  dest_map = {name: dest for name, dest in uploaded_uris}
+
+  # camels -> caravan-original/attributes/camels/
+  assert any(
+      dest == "gs://open-multimet/caravan-new/caravan-original/attributes/camels/"
+      for _, dest in uploaded_uris
+  )
+  # camelsde -> caravan-extensions/attributes/camelsde/
+  assert any(
+      dest == "gs://open-multimet/caravan-new/caravan-extensions/attributes/camelsde/"
+      for _, dest in uploaded_uris
+  )
+  # camelsfr -> google-internal/attributes/camelsfr/
+  assert any(
+      dest == "gs://open-multimet/caravan-new/google-internal/attributes/camelsfr/"
+      for _, dest in uploaded_uris
+  )
+
+
+

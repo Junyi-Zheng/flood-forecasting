@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import pandas as pd
 from tqdm.auto import tqdm
 
+from static_extractor.config import CARAVAN_SUBDIR_MAPPING
 from static_extractor.extractor import StaticAttributesExtractor
 
 logger = logging.getLogger("static_extractor.batch_runner")
@@ -179,6 +180,47 @@ def export_subdataset_partitioned_files(
   if other_path.exists():
     result["other"] = other_path
   return result
+
+
+def get_collection_and_subdataset(
+    ds_name: str, vector_path: Optional[Path] = None
+) -> Tuple[str, str]:
+  """Resolves the Caravan collection and subdataset name for a given dataset."""
+  key = ds_name.upper().replace("_BASIN_SHAPES", "").replace("_BASINS", "")
+  if key in CARAVAN_SUBDIR_MAPPING:
+    return CARAVAN_SUBDIR_MAPPING[key]
+
+  if vector_path is not None:
+    path_str = str(vector_path)
+    for coll in ["caravan-original", "caravan-extensions", "google-internal"]:
+      if coll in path_str:
+        return coll, ds_name.lower()
+
+  return "other", ds_name.lower()
+
+
+def get_target_output_dir(
+    base_output_dir: str,
+    coll: str,
+    ds_name: str,
+    preserve_caravan_dirs: bool = False,
+) -> str:
+  """Builds the destination directory path for a subdataset."""
+  base_clean = base_output_dir.rstrip("/")
+  if not preserve_caravan_dirs:
+    return f"{base_clean}/{ds_name}"
+
+  # If base already ends with /attributes
+  if base_clean.endswith("/attributes"):
+    return f"{base_clean}/{ds_name}"
+
+  # If base ends with a specific collection
+  last_segment = base_clean.split("/")[-1]
+  if last_segment in ["caravan-original", "caravan-extensions", "google-internal"]:
+    return f"{base_clean}/attributes/{ds_name}"
+
+  # Otherwise: <base_output>/<collection>/attributes/<subdataset>
+  return f"{base_clean}/{coll}/attributes/{ds_name}"
 
 
 def gcs_path_exists(gcs_uri: str) -> bool:
@@ -437,7 +479,20 @@ def discover_datasets(
   if parent_dirs:
     for p_str in parent_dirs:
       if p_str.startswith("gs://"):
-        parts = [p for p in p_str.rstrip("/").split("/") if p and p != "gs:"]
+        clean_p = p_str.rstrip("/")
+        # If pointing to caravan-new root, automatically expand to the collections' shapefile directories
+        if clean_p.endswith("caravan-new"):
+          for coll in ["caravan-original", "caravan-extensions", "google-internal"]:
+            coll_shapefiles = f"{clean_p}/{coll}/shapefiles"
+            local_parent = sync_gcs_directory(
+                coll_shapefiles, staging_cache_dir / f"{coll}_shapefiles"
+            )
+            found = find_all_dataset_dirs(local_parent)
+            if found:
+              dataset_map.update(found)
+          continue
+
+        parts = [p for p in clean_p.split("/") if p and p != "gs:"]
         if len(parts) >= 2 and parts[-1] in ["shapefiles", "shapefiles-rederived", "data"]:
           parent_name = f"{parts[-2]}_{parts[-1]}"
         else:
@@ -446,6 +501,15 @@ def discover_datasets(
             p_str, staging_cache_dir / parent_name
         )
       else:
+        clean_p = str(p_str).rstrip("/")
+        if clean_p.endswith("caravan-new") and Path(clean_p).is_dir():
+          for coll in ["caravan-original", "caravan-extensions", "google-internal"]:
+            coll_shapefiles = Path(clean_p) / coll / "shapefiles"
+            if coll_shapefiles.is_dir():
+              found = find_all_dataset_dirs(coll_shapefiles)
+              if found:
+                dataset_map.update(found)
+          continue
         local_parent = Path(p_str)
 
       if not local_parent.is_dir():
@@ -482,12 +546,15 @@ def run_batch_extraction(
     resume: bool = True,
     show_progress: bool = True,
     partition_outputs: Optional[bool] = None,
+    preserve_caravan_dirs: bool = False,
 ) -> Dict[str, pd.DataFrame]:
   """Runs static attribute extraction across all discovered datasets."""
   is_gcs_output = str(output_dir).startswith("gs://")
   target_gcs_uri = str(output_dir) if is_gcs_output else gcs_output_uri
 
-  if partition_outputs is None:
+  if preserve_caravan_dirs:
+    partition_outputs = True
+  elif partition_outputs is None:
     out_str = str(output_dir)
     gcs_str = str(gcs_output_uri) if gcs_output_uri else ""
     partition_outputs = ("caravan-new" in out_str) or ("caravan-new" in gcs_str)
@@ -499,10 +566,11 @@ def run_batch_extraction(
       out_dir = Path.home() / ".cache" / "googlehydrology" / "output_csvs"
     out_dir.mkdir(parents=True, exist_ok=True)
     logger.debug(
-        "Output configured for GCS: %s (staging locally in %s, partition_outputs=%s)",
+        "Output configured for GCS: %s (staging locally in %s, partition_outputs=%s, preserve_caravan_dirs=%s)",
         target_gcs_uri,
         out_dir,
         partition_outputs,
+        preserve_caravan_dirs,
     )
   else:
     out_dir = Path(output_dir)
@@ -539,8 +607,29 @@ def run_batch_extraction(
   )
 
   for i, (ds_name, vector_path) in enumerate(dataset_map.items(), start=1):
-    if partition_outputs:
+    coll, sub_name = get_collection_and_subdataset(ds_name, vector_path)
+    if preserve_caravan_dirs:
+      target_folder_local = get_target_output_dir(
+          str(out_dir), coll, sub_name, preserve_caravan_dirs=True
+      )
+      sub_dir = Path(target_folder_local)
+      sub_dir.mkdir(parents=True, exist_ok=True)
+    elif partition_outputs:
       sub_dir = out_dir / ds_name
+      sub_dir.mkdir(parents=True, exist_ok=True)
+    else:
+      sub_dir = out_dir
+
+    if target_gcs_uri:
+      target_ds_gcs = get_target_output_dir(
+          target_gcs_uri, coll, sub_name, preserve_caravan_dirs=preserve_caravan_dirs
+      )
+      if not target_ds_gcs.endswith("/"):
+        target_ds_gcs += "/"
+    else:
+      target_ds_gcs = None
+
+    if partition_outputs:
       parquet_file = sub_dir / f"attributes_{ds_name}.parquet"
       hydro_file = sub_dir / f"attributes_hydroatlas_{ds_name}.csv"
       caravan_file = sub_dir / f"attributes_caravan_{ds_name}.csv"
@@ -588,11 +677,10 @@ def run_batch_extraction(
         exported_files = export_subdataset_partitioned_files(
             df=df,
             ds_name=ds_name,
-            output_sub_dir=out_dir / ds_name,
+            output_sub_dir=sub_dir,
             vector_path=vector_path,
         )
-        if target_gcs_uri:
-          target_ds_gcs = f"{target_gcs_uri.rstrip('/')}/{ds_name}/"
+        if target_ds_gcs:
           for f_path in exported_files.values():
             upload_to_gcs(f_path, target_ds_gcs)
         extracted_dfs[ds_name] = pd.read_parquet(exported_files["parquet"])
@@ -601,7 +689,7 @@ def run_batch_extraction(
             ds_name,
             len(df),
             elapsed,
-            out_dir / ds_name,
+            sub_dir,
         )
       else:
         if target_gcs_uri:
@@ -713,6 +801,11 @@ def parse_args(args=None):
       action=argparse.BooleanOptionalAction,
       default=None,
       help="Partition output attributes per subdataset directory into attributes_hydroatlas_<ds>.csv, attributes_caravan_<ds>.csv, and attributes_<ds>.parquet matching caravan-new schema.",
+  )
+  parser.add_argument(
+      "--preserve-caravan-dirs",
+      action="store_true",
+      help="Partition static attributes by Caravan collection and subdataset into <collection>/attributes/<subdataset>/ per the canonical storage contract.",
   )
   parser.add_argument(
       "--gcs-output-uri",
@@ -862,6 +955,7 @@ def main(args=None):
         resume=parsed.resume,
         show_progress=parsed.show_progress,
         partition_outputs=parsed.partition_outputs,
+        preserve_caravan_dirs=parsed.preserve_caravan_dirs,
     )
   finally:
     if parsed.clean_cache and cache_root.exists():

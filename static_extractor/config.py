@@ -111,6 +111,34 @@ GCS_ERA5_GRIDDED_ZARR_URI: str = "gs://open-multimet/gridded-data-archives/ERA5_
 GCS_BENCHMARK_URI: str = "gs://open-multimet/ancillary-data/benchmarks/benchmark_basins_500.parquet"
 DEFAULT_ERA5_SOURCE: str = "hybas"  # Options: "hybas" (precalculated subbasins), "gridded" (recalculated on the fly from archived gridded Zarr)
 
+# Caravan Collection and Subdataset Subdirectory Mapping
+CARAVAN_SUBDIR_MAPPING: Dict[str, Tuple[str, str]] = {
+    # caravan-original/
+    "CAMELS": ("caravan-original", "camels"),
+    "CAMELSAUS": ("caravan-original", "camelsaus"),
+    "CAMELSBR": ("caravan-original", "camelsbr"),
+    "CAMELSCL": ("caravan-original", "camelscl"),
+    "CAMELSGB": ("caravan-original", "camelsgb"),
+    "HYSETS": ("caravan-original", "hysets"),
+    "LAMAH": ("caravan-original", "lamah"),
+    # caravan-extensions/
+    "CAMELSCH": ("caravan-extensions", "camelsch"),
+    "CAMELSCZ": ("caravan-extensions", "camelscz"),
+    "CAMELSDE": ("caravan-extensions", "camelsde"),
+    "CAMELSDK": ("caravan-extensions", "camelsdk"),
+    "CAMELSES": ("caravan-extensions", "camelses"),
+    "GRDC": ("caravan-extensions", "grdc"),
+    "IL": ("caravan-extensions", "il"),
+    "LAMAHICE": ("caravan-extensions", "lamahice"),
+    # google-internal/
+    "CAMELSCOL": ("google-internal", "camelscol"),
+    "CAMELSFR": ("google-internal", "camelsfr"),
+    "CAMELSIND": ("google-internal", "camelsind"),
+    "CAMELSLUX": ("google-internal", "camelslux"),
+    "CAMELSNZ": ("google-internal", "camelsnz"),
+    "CAMELSPE": ("google-internal", "camelspe"),
+}
+
 # Curated Attribute Definitions with Metadata
 ATTRIBUTE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
     # Topography & Physiography

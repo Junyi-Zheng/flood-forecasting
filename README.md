@@ -168,10 +168,11 @@ extract-caravan-static \
     --input /path/to/watershed_polygons.geojson \
     --output /path/to/extracted_caravan_attributes.csv
 
-# Multi-dataset batch runner for static attributes (into canonical caravan-new layout)
+# Multi-dataset batch runner across all collections into canonical caravan-new layout
 extract-caravan-static-batch \
-    --parent-dir gs://open-multimet/caravan-new/caravan-original/shapefiles/ \
-    --output-dir gs://open-multimet/caravan-new/caravan-original/attributes/ \
+    --parent-dir gs://open-multimet/caravan-new/ \
+    --output-dir gs://open-multimet/caravan-new/ \
+    --preserve-caravan-dirs \
     --workers 16
 ```
 

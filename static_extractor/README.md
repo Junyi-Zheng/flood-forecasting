@@ -116,10 +116,11 @@ extract-caravan-static-batch \
     --workers 32 \
     --combine
 
-# 2. Run directly from Google Cloud Storage parent URI into canonical caravan-new layout
+# 2. Run directly across all Caravan collections in a single command using --preserve-caravan-dirs:
 extract-caravan-static-batch \
-    --parent-dir gs://open-multimet/caravan-new/caravan-original/shapefiles/ \
-    --output-dir gs://open-multimet/caravan-new/caravan-original/attributes/ \
+    --parent-dir gs://open-multimet/caravan-new/ \
+    --output-dir gs://open-multimet/caravan-new/ \
+    --preserve-caravan-dirs \
     --workers 16
 
 # 3. Run for an explicit list of dataset directories
@@ -130,15 +131,18 @@ extract-caravan-static-batch \
 ```
 
 ### Batch Runner Arguments
-- `--parent-dir`, `-p`: Parent directory containing dataset subdirectories (local path or `gs://...`). Can be passed multiple times.
+- `--parent-dir`, `-p`: Parent directory containing dataset subdirectories (local path or `gs://...`). Can be passed multiple times or pointed at the root `gs://open-multimet/caravan-new/`.
 - `--input-dirs`, `-d`: Explicit list of dataset directories.
 - `--input-files`, `-f`: Explicit list of vector files (`.shp`, `.geojson`, `.gpkg`).
-- `--output-dir`, `-o`: Output directory for generated files. Automatically creates partitioned subdataset folders (`attributes_hydroatlas_<ds>.csv`, `attributes_caravan_<ds>.csv`, `attributes_<ds>.parquet`) when writing to `caravan-new` or when `--partition-outputs` is set.
-- `--partition-outputs`, `-P`: Explicitly enable partitioned subdataset outputs.
+- `--output-dir`, `-o`: Output directory for generated files.
+- `--preserve-caravan-dirs`: Automatically routes and partitions static attributes by Caravan collection and subdataset into `<collection>/attributes/<subdataset>/` matching the canonical storage contract.
+- `--partition-outputs`, `-P`: Explicitly enable partitioned subdataset outputs (`attributes_hydroatlas_<ds>.csv`, `attributes_caravan_<ds>.csv`, `attributes_<ds>.parquet`).
 - `--workers`, `-w`: Number of parallel worker processes.
 - `--era5-source`: `hybas` (default) or `gridded`.
 - `--combine`: Generates aggregated combined tables (`attributes_caravan_combined.csv` and `attributes_combined.parquet`) merging all datasets.
 - `--no-resume`: Disables resume (by default, already completed datasets are skipped).
+- `--clean-cache`: Automatically cleans up the entire local runtime cache directory (`~/.cache/googlehydrology/`) after batch extraction completes.
+- `--clean-staging`: Automatically cleans up only temporary staged shapefiles while preserving the HydroATLAS GDB and ERA5 climate tables.
 
 ---
 
