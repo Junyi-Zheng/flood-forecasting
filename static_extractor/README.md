@@ -103,27 +103,27 @@ extract-caravan-static \
 
 ---
 
-## 🚀 Multi-Dataset Batch Runner (`extract-caravan-batch`)
+## 🚀 Multi-Dataset Static Batch Runner (`extract-caravan-static-batch`)
 
-For processing multiple Caravan datasets in one command, the package provides `extract-caravan-batch`. It accepts parent directories, directory lists, or direct GCS URIs, auto-discovers watershed shapefiles, supports `--workers` parallelization, and outputs separate CSVs per dataset plus an optional combined CSV:
+For batch processing static attributes across multiple Caravan datasets in one command, the package provides `extract-caravan-static-batch` (alias `extract-static-attributes-batch`). It specifically extracts the static HydroATLAS physiographic attributes and ERA5 climate indices. It accepts parent directories, directory lists, or direct GCS URIs, auto-discovers watershed shapefiles, supports `--workers` parallelization, and outputs separate CSVs per dataset plus an optional combined CSV:
 
 ```bash
 # 1. Run all datasets within a parent directory (e.g. caravan/ containing camels/, hysets/, etc.)
-extract-caravan-batch \
+extract-caravan-static-batch \
     --parent-dir /path/to/caravan_shapefiles/caravan/ \
     --output-dir /path/to/extracted_csvs/ \
     --workers 32 \
     --combine
 
 # 2. Run directly from Google Cloud Storage parent URI
-extract-caravan-batch \
+extract-caravan-static-batch \
     --parent-dir gs://open-multimet/data/caravan_shapefiles/caravan/ \
     --output-dir /path/to/extracted_csvs/ \
     --workers 32 \
     --combine
 
 # 3. Run for an explicit list of dataset directories
-extract-caravan-batch \
+extract-caravan-static-batch \
     --input-dirs /data/shapes/camels /data/shapes/camelsaus /data/shapes/lamah \
     --output-dir /path/to/extracted_csvs/ \
     --workers 32

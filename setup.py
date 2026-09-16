@@ -55,7 +55,8 @@ setup(
             'run=googlehydrology.run:_main',
             'extract-caravan-static=static_extractor.cli:main',
             'extract-static-attributes=static_extractor.cli:main',
-            'extract-caravan-batch=static_extractor.batch_runner:main',
+            'extract-caravan-static-batch=static_extractor.batch_runner:main',
+            'extract-static-attributes-batch=static_extractor.batch_runner:main',
         ]
     },
     python_requires='>=3.12',
