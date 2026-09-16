@@ -19,10 +19,6 @@ and anthropogenic static attributes for arbitrary watershed polygons following
 the official Caravan and HydroATLAS Level 12 aggregation methodology.
 """
 
-from static_extractor.batch_runner import (
-    discover_datasets,
-    run_batch_extraction,
-)
 from static_extractor.climate import (
     ERA5ClimateLoader,
     ERA5GriddedExtractor,
@@ -84,3 +80,11 @@ __all__ = [
     "GCS_PARQUET_URI",
     "GCS_ERA5_GRIDDED_ZARR_URI",
 ]
+
+
+def __getattr__(name: str):
+  if name in ("discover_datasets", "run_batch_extraction"):
+    from static_extractor import batch_runner
+    return getattr(batch_runner, name)
+  raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
