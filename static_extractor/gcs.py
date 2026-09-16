@@ -63,7 +63,7 @@ def download_hydroatlas_from_gcs(
     )
 
   if dest_path.exists() and any(dest_path.iterdir()):
-    logger.info("BasinATLAS GDB already exists at: %s", dest_path)
+    logger.debug("BasinATLAS GDB already exists at: %s", dest_path)
     return dest_path
 
   dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,7 +75,7 @@ def download_hydroatlas_from_gcs(
       cmd = ["gcloud", "storage", "cp", "-r", source_uri, str(dest_path.parent)]
       res = subprocess.run(cmd, capture_output=True, timeout=600)
       if res.returncode == 0 and dest_path.exists():
-        logger.info("Successfully downloaded BasinATLAS GDB via gcloud storage.")
+        logger.debug("Successfully downloaded BasinATLAS GDB via gcloud storage.")
         return dest_path
     except Exception as e:
       logger.warning("gcloud storage download attempt failed: %s", e)
@@ -92,7 +92,7 @@ def download_hydroatlas_from_gcs(
     if fs.exists(clean_src):
       dest_path.mkdir(parents=True, exist_ok=True)
       fs.get(clean_src, str(dest_path), recursive=True)
-      logger.info("Successfully downloaded BasinATLAS GDB via gcsfs.")
+      logger.debug("Successfully downloaded BasinATLAS GDB via gcsfs.")
       return dest_path
   except Exception as e:
     logger.warning("gcsfs download attempt failed: %s", e)
@@ -123,7 +123,7 @@ def download_parquet_attributes_from_gcs(
     return dest_path
 
   dest_path.parent.mkdir(parents=True, exist_ok=True)
-  logger.info("Downloading HydroATLAS parquet from %s to %s...", source_uri, dest_path)
+  logger.debug("Downloading HydroATLAS parquet from %s to %s...", source_uri, dest_path)
 
   if shutil.which("gcloud"):
     try:

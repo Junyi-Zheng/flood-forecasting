@@ -36,6 +36,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely.geometry
+from tqdm.auto import tqdm
 shape = shapely.geometry.shape
 Point = shapely.geometry.Point
 Polygon = shapely.geometry.Polygon
@@ -356,7 +357,7 @@ class StaticAttributesExtractor:
       gdf_subbasins = gpd.GeoDataFrame()
 
     if len(gdf_subbasins) == 0:
-      logger.info("No sub-basins found in immediate bbox %s. Trying broader bbox.", bbox)
+      logger.debug("No sub-basins found in immediate bbox %s. Trying broader bbox.", bbox)
       bbox_wide = (minx - 0.1, miny - 0.1, maxx + 0.1, maxy + 0.1)
       try:
         gdf_subbasins = self._read_subbasins_in_bbox(bbox_wide)
@@ -668,6 +669,8 @@ class StaticAttributesExtractor:
       min_overlap_threshold: float = 0.0,
       era5_source: Optional[str] = None,
       workers: int = 1,
+      show_progress: bool = True,
+      dataset_name: Optional[str] = None,
   ) -> pd.DataFrame:
     """Extracts Caravan attributes for all features in a vector file (Shapefile, GeoJSON, GeoPackage).
 
@@ -678,6 +681,8 @@ class StaticAttributesExtractor:
       min_overlap_threshold: Minimum area threshold in km2.
       era5_source: Optional ERA5 sourcing mode override ('hybas' or 'gridded').
       workers: Number of parallel processes to use (default 1).
+      show_progress: Whether to show an interactive tqdm progress bar.
+      dataset_name: Optional dataset label to display in the progress bar.
 
     Returns:
       Pandas DataFrame with extracted attributes, indexed by gauge_id.
@@ -701,8 +706,11 @@ class StaticAttributesExtractor:
       gid = str(row[id_column]) if id_column and id_column in row else f"basin_{idx+1}"
       tasks.append((row.geometry, gid))
 
+    ds_label = dataset_name or Path(input_path).stem.replace("_basin_shapes", "").replace("_basins", "")
+
     if workers > 1 and len(tasks) > 1:
       import concurrent.futures
+      import multiprocessing as mp
       worker_args = [
           (
               geom,
@@ -715,21 +723,41 @@ class StaticAttributesExtractor:
           )
           for geom, gid in tasks
       ]
-      logger.info(
+      logger.debug(
           "Processing %d catchments in parallel with %d workers...",
           len(tasks),
           workers,
       )
-      import concurrent.futures
-      import multiprocessing as mp
       ctx = mp.get_context("spawn")
+      results = [None] * len(tasks)
       with concurrent.futures.ProcessPoolExecutor(
           max_workers=workers, mp_context=ctx
       ) as executor:
-        results = list(executor.map(_worker_extract_polygon, worker_args))
+        future_to_idx = {
+            executor.submit(_worker_extract_polygon, arg): i
+            for i, arg in enumerate(worker_args)
+        }
+        for future in tqdm(
+            concurrent.futures.as_completed(future_to_idx),
+            total=len(tasks),
+            desc=f"  ↳ {ds_label}",
+            unit="basin",
+            leave=False,
+            dynamic_ncols=True,
+            disable=not show_progress,
+        ):
+          idx = future_to_idx[future]
+          results[idx] = future.result()
     else:
       results = []
-      for geom, gid in tasks:
+      for geom, gid in tqdm(
+          tasks,
+          desc=f"  ↳ {ds_label}",
+          unit="basin",
+          leave=False,
+          dynamic_ncols=True,
+          disable=not show_progress,
+      ):
         res = self.extract_attributes_for_polygon(
             geom,
             catchment_id=gid,
@@ -772,7 +800,7 @@ class StaticAttributesExtractor:
       p = Path(output_csv_path)
       p.parent.mkdir(parents=True, exist_ok=True)
       df.to_csv(p)
-      logger.info("Saved Caravan static attributes to %s (shape: %s)", p, df.shape)
+      logger.debug("Saved Caravan static attributes to %s (shape: %s)", p, df.shape)
 
     return df
 

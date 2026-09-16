@@ -27,14 +27,37 @@ import time
 from typing import Dict, List, Optional, Tuple, Union
 
 import pandas as pd
+from tqdm.auto import tqdm
 
 from static_extractor.extractor import StaticAttributesExtractor
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger("static_extractor.batch_runner")
+
+
+def setup_logging(verbose: bool = False) -> None:
+  """Configures logging levels, suppressing noisy info logs unless verbose."""
+  level = logging.DEBUG if verbose else logging.WARNING
+  logging.basicConfig(
+      level=level,
+      format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+      force=True,
+  )
+  if not verbose:
+    for name in [
+        "static_extractor",
+        "static_extractor.batch_runner",
+        "static_extractor.extractor",
+        "static_extractor.gcs",
+        "static_extractor.climate",
+        "urllib3",
+        "google",
+        "google.auth",
+        "gcsfs",
+        "fiona",
+        "pyogrio",
+    ]:
+      logging.getLogger(name).setLevel(logging.WARNING)
+
 
 SUPPORTED_EXTENSIONS = [".shp", ".geojson", ".gpkg", ".json", ".parquet", ".geoparquet"]
 
@@ -70,7 +93,7 @@ def upload_to_gcs(local_path: Path, gcs_dest_uri: str) -> bool:
   """Uploads a local file or directory to a GCS destination."""
   gcs_dest_clean = gcs_dest_uri if gcs_dest_uri.endswith("/") else gcs_dest_uri + "/"
   target_uri = f"{gcs_dest_clean}{local_path.name}" if local_path.is_file() else gcs_dest_clean
-  logger.info("Uploading %s to %s...", local_path, target_uri)
+  logger.debug("Uploading %s to %s...", local_path, target_uri)
 
   # 1. Try gcloud storage cp / rsync
   if shutil.which("gcloud"):
@@ -82,7 +105,7 @@ def upload_to_gcs(local_path: Path, gcs_dest_uri: str) -> bool:
       )
       res = subprocess.run(cmd, capture_output=True, text=True, check=False)
       if res.returncode == 0:
-        logger.info("Successfully uploaded %s to %s via gcloud storage.", local_path.name, target_uri)
+        logger.debug("Successfully uploaded %s to %s via gcloud storage.", local_path.name, target_uri)
         return True
       logger.debug("gcloud storage upload failed: %s. Trying gsutil...", res.stderr)
     except Exception as e:
@@ -98,7 +121,7 @@ def upload_to_gcs(local_path: Path, gcs_dest_uri: str) -> bool:
       )
       res = subprocess.run(cmd, capture_output=True, text=True, check=False)
       if res.returncode == 0:
-        logger.info("Successfully uploaded %s to %s via gsutil.", local_path.name, target_uri)
+        logger.debug("Successfully uploaded %s to %s via gsutil.", local_path.name, target_uri)
         return True
       logger.debug("gsutil upload failed: %s", res.stderr)
     except Exception as e:
@@ -113,7 +136,7 @@ def upload_to_gcs(local_path: Path, gcs_dest_uri: str) -> bool:
       fs.put(str(local_path), clean_target)
     else:
       fs.put(str(local_path), clean_target, recursive=True)
-    logger.info("Successfully uploaded %s to %s via gcsfs.", local_path.name, target_uri)
+    logger.debug("Successfully uploaded %s to %s via gcsfs.", local_path.name, target_uri)
     return True
   except Exception as e:
     logger.error("Failed to upload %s to %s: %s", local_path, target_uri, e)
@@ -123,7 +146,7 @@ def upload_to_gcs(local_path: Path, gcs_dest_uri: str) -> bool:
 def sync_gcs_directory(gcs_uri: str, local_dest: Path) -> Path:
   """Syncs a GCS directory to a local directory using gcloud storage or gsutil."""
   local_dest.mkdir(parents=True, exist_ok=True)
-  logger.info("Syncing %s to local staging directory %s...", gcs_uri, local_dest)
+  logger.debug("Syncing %s to local staging directory %s...", gcs_uri, local_dest)
 
   gcs_uri_clean = gcs_uri if gcs_uri.endswith("/") else gcs_uri + "/"
 
@@ -334,6 +357,7 @@ def run_batch_extraction(
     min_overlap_threshold: float = 0.0,
     combine: bool = False,
     resume: bool = True,
+    show_progress: bool = True,
 ) -> Dict[str, pd.DataFrame]:
   """Runs static attribute extraction across all discovered datasets."""
   is_gcs_output = str(output_dir).startswith("gs://")
@@ -345,7 +369,7 @@ def run_batch_extraction(
     else:
       out_dir = Path.home() / ".cache" / "googlehydrology" / "output_csvs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(
+    logger.debug(
         "Output configured for GCS: %s (staging locally in %s)",
         target_gcs_uri,
         out_dir,
@@ -355,13 +379,13 @@ def run_batch_extraction(
     out_dir.mkdir(parents=True, exist_ok=True)
 
   if resume and target_gcs_uri and gcs_path_exists(target_gcs_uri):
-    logger.info(
+    logger.debug(
         "Pre-syncing existing extracted CSVs from GCS destination %s to allow resume...",
         target_gcs_uri,
     )
     sync_gcs_directory(target_gcs_uri, out_dir)
 
-  logger.info("Initializing StaticAttributesExtractor (era5_source=%s)...", era5_source)
+  logger.debug("Initializing StaticAttributesExtractor (era5_source=%s)...", era5_source)
   extractor = StaticAttributesExtractor(
       gdb_path=gdb_path,
       era5_cache_dir=era5_cache_dir,
@@ -374,32 +398,26 @@ def run_batch_extraction(
   total_datasets = len(dataset_map)
   start_all = time.time()
 
-  logger.info("Found %d datasets to process: %s", total_datasets, list(dataset_map.keys()))
+  logger.debug("Found %d datasets to process: %s", total_datasets, list(dataset_map.keys()))
+
+  dataset_pbar = tqdm(
+      total=total_datasets,
+      desc="Datasets",
+      unit="dataset",
+      dynamic_ncols=True,
+      disable=not show_progress,
+  )
 
   for i, (ds_name, vector_path) in enumerate(dataset_map.items(), start=1):
     out_file = out_dir / f"attributes_caravan_{ds_name}.csv"
     if resume and out_file.exists() and out_file.stat().st_size > 500:
-      logger.info(
-          "[%d/%d] Skipping %s (already completed: %s)",
-          i,
-          total_datasets,
-          ds_name,
-          out_file,
-      )
       df = pd.read_csv(out_file, index_col=0)
       extracted_dfs[ds_name] = df
+      dataset_pbar.set_postfix_str(f"Skipped {ds_name} (already done)")
+      dataset_pbar.update(1)
       continue
 
-    logger.info(
-        "==========================================================\n"
-        "[%d/%d] Processing dataset '%s' from %s (workers=%d)...\n"
-        "==========================================================",
-        i,
-        total_datasets,
-        ds_name,
-        vector_path,
-        workers,
-    )
+    dataset_pbar.set_postfix_str(f"Extracting {ds_name}...")
     t0 = time.time()
     try:
       df = extractor.extract_attributes_from_file(
@@ -408,9 +426,11 @@ def run_batch_extraction(
           min_overlap_threshold=min_overlap_threshold,
           era5_source=era5_source,
           workers=workers,
+          show_progress=show_progress,
+          dataset_name=ds_name,
       )
       elapsed = time.time() - t0
-      logger.info(
+      logger.debug(
           "Successfully completed '%s': %d basins extracted in %.1f seconds (saved to %s)",
           ds_name,
           len(df),
@@ -420,12 +440,17 @@ def run_batch_extraction(
       if target_gcs_uri:
         upload_to_gcs(out_file, target_gcs_uri)
       extracted_dfs[ds_name] = df
+      dataset_pbar.set_postfix_str(f"Done {ds_name} ({len(df):,} basins, {elapsed:.1f}s)")
     except Exception as e:
       logger.exception("Error extracting attributes for dataset '%s': %s", ds_name, e)
+    finally:
+      dataset_pbar.update(1)
+
+  dataset_pbar.close()
 
   total_elapsed = time.time() - start_all
   total_basins = sum(len(df) for df in extracted_dfs.values())
-  logger.info(
+  logger.debug(
       "All datasets processed: %d total basins across %d datasets in %.1f seconds.",
       total_basins,
       len(extracted_dfs),
@@ -434,18 +459,30 @@ def run_batch_extraction(
 
   if combine and extracted_dfs:
     combined_path = out_dir / "attributes_caravan_combined.csv"
-    logger.info("Combining all %d datasets into %s...", len(extracted_dfs), combined_path)
+    logger.debug("Combining all %d datasets into %s...", len(extracted_dfs), combined_path)
     combined_df = pd.concat(list(extracted_dfs.values()), axis=0)
     combined_df.to_csv(combined_path)
-    logger.info("Combined CSV written: %d total rows.", len(combined_df))
+    logger.debug("Combined CSV written: %d total rows.", len(combined_df))
     if target_gcs_uri:
       upload_to_gcs(combined_path, target_gcs_uri)
 
   if target_gcs_uri:
-    logger.info(
+    logger.debug(
         "All extracted datasets uploaded to canonical GCS destination: %s",
         target_gcs_uri,
     )
+
+  if show_progress:
+    print(
+        f"\n✓ Extracted {total_basins:,} basins across {len(extracted_dfs)} datasets "
+        f"in {total_elapsed:.1f}s ({total_elapsed/60:.1f} min)."
+    )
+    if combine and extracted_dfs:
+      print(f"✓ Combined CSV generated: {combined_path.name} ({len(combined_df):,} total rows)")
+    if target_gcs_uri:
+      print(f"✓ Results stored in canonical GCS destination: {target_gcs_uri}")
+    else:
+      print(f"✓ Results stored locally at: {out_dir}")
 
   return extracted_dfs
 
@@ -561,11 +598,25 @@ def parse_args(args=None):
       default=True,
       help="Do not skip datasets that have already been extracted.",
   )
+  parser.add_argument(
+      "--verbose",
+      "-v",
+      action="store_true",
+      help="Show detailed debug/info log messages (disabled by default for clean progress bar output).",
+  )
+  parser.add_argument(
+      "--no-progress",
+      action="store_false",
+      dest="show_progress",
+      default=True,
+      help="Disable interactive progress bars.",
+  )
   return parser.parse_args(args)
 
 
 def main(args=None):
   parsed = parse_args(args)
+  setup_logging(parsed.verbose)
   cache_root = Path(parsed.cache_dir) if parsed.cache_dir else Path.home() / ".cache" / "googlehydrology"
   staging_cache = cache_root / "staged_shapefiles"
   gdb_path = parsed.gdb_path or (cache_root / "hydroatlas" / "BasinATLAS_v10.gdb")
@@ -586,6 +637,9 @@ def main(args=None):
       logger.error("Must provide at least one of --parent-dir, --input-dirs, or --input-files.")
       sys.exit(1)
 
+    if parsed.show_progress:
+      print("Discovering dataset polygons...")
+
     dataset_map = discover_datasets(
         parent_dirs=parsed.parent_dirs,
         input_dirs=parsed.input_dirs,
@@ -596,6 +650,9 @@ def main(args=None):
     if not dataset_map:
       logger.error("No valid dataset vector files found matching provided paths.")
       sys.exit(1)
+
+    if parsed.show_progress:
+      print(f"Found {len(dataset_map)} datasets to process: {', '.join(sorted(dataset_map.keys()))}\n")
 
     run_batch_extraction(
         dataset_map=dataset_map,
@@ -610,13 +667,14 @@ def main(args=None):
         min_overlap_threshold=parsed.min_overlap_threshold,
         combine=parsed.combine,
         resume=parsed.resume,
+        show_progress=parsed.show_progress,
     )
   finally:
     if parsed.clean_cache and cache_root.exists():
-      logger.info("Cleaning up cache root directory %s...", cache_root)
+      logger.debug("Cleaning up cache root directory %s...", cache_root)
       shutil.rmtree(cache_root, ignore_errors=True)
     elif parsed.clean_staging and staging_cache.exists():
-      logger.info("Cleaning up staged shapefiles directory %s...", staging_cache)
+      logger.debug("Cleaning up staged shapefiles directory %s...", staging_cache)
       shutil.rmtree(staging_cache, ignore_errors=True)
 
 

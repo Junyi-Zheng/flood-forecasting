@@ -415,3 +415,27 @@ def test_batch_runner_gcs_output_and_args(tmp_path, monkeypatch):
   # Should have uploaded dataset CSV and combined CSV
   assert mock_upload.call_count == 2
 
+
+def test_batch_runner_progress_and_quiet_logging(tmp_path):
+  """Verifies that --verbose and --no-progress flags are properly parsed and setup_logging configures root logger."""
+  import logging
+  from static_extractor.batch_runner import parse_args, setup_logging
+
+  # Test default parser flags
+  args = parse_args(["-o", str(tmp_path / "out")])
+  assert args.verbose is False
+  assert args.show_progress is True
+
+  # Test verbose and no-progress flags
+  args_v = parse_args(["-o", str(tmp_path / "out"), "-v", "--no-progress"])
+  assert args_v.verbose is True
+  assert args_v.show_progress is False
+
+  # Test setup_logging suppresses info logs when verbose=False
+  setup_logging(verbose=False)
+  assert logging.getLogger("static_extractor").level == logging.WARNING
+
+  setup_logging(verbose=True)
+  assert logging.getLogger().level == logging.DEBUG
+
+

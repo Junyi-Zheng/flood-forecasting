@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 import shapely.wkt
+from tqdm.auto import tqdm
 
 from static_extractor.config import (
     ATTRIBUTE_DEFINITIONS,
@@ -408,15 +409,15 @@ def run_benchmark(
         for arg in worker_args
     }
 
-    done_count = 0
-    total = len(futures)
-    for fut in as_completed(futures):
+    for fut in tqdm(
+        as_completed(futures),
+        total=len(futures),
+        desc="Evaluating basins",
+        unit="basin",
+        dynamic_ncols=True,
+    ):
       res = fut.result()
       results.append(res)
-      done_count += 1
-      if done_count % 50 == 0 or done_count == total:
-        pct = (done_count / total) * 100
-        print(f"Progress: [{done_count}/{total}] basins evaluated ({pct:.1f}%)")
 
   total_wall_time = time.time() - t_start
   basin_metrics_df = pd.DataFrame(

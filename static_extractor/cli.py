@@ -117,11 +117,27 @@ def parse_args(args=None):
       type=int,
       help="Number of parallel worker processes to use (default: 1).",
   )
+  parser.add_argument(
+      "--verbose",
+      "-v",
+      action="store_true",
+      help="Show detailed debug/info log messages (disabled by default for clean progress bars).",
+  )
   return parser.parse_args(args)
 
 
 def main(args=None):
   parsed = parse_args(args)
+  level = logging.DEBUG if parsed.verbose else logging.WARNING
+  logging.basicConfig(
+      level=level,
+      format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+      force=True,
+  )
+  if not parsed.verbose:
+    for name in ["static_extractor", "urllib3", "google", "gcsfs", "fiona", "pyogrio"]:
+      logging.getLogger(name).setLevel(logging.WARNING)
+
   input_path = Path(parsed.input)
   if not input_path.exists():
     logger.error("Input file '%s' does not exist.", input_path)
@@ -132,7 +148,7 @@ def main(args=None):
   era5_cache_dir = parsed.era5_cache_dir or (cache_root / "era5_climate")
 
   try:
-    logger.info("Initializing Caravan Static Attributes Extractor (ERA5 source: %s)...", parsed.era5_source)
+    logger.debug("Initializing Caravan Static Attributes Extractor (ERA5 source: %s)...", parsed.era5_source)
     extractor = StaticAttributesExtractor(
         gdb_path=str(gdb_path),
         era5_cache_dir=str(era5_cache_dir),
@@ -141,7 +157,7 @@ def main(args=None):
         gridded_era5_uri=parsed.gridded_era5_uri,
     )
 
-    logger.info(
+    logger.debug(
         "Extracting static attributes from '%s' (workers=%d)...",
         input_path,
         parsed.workers,
@@ -152,18 +168,16 @@ def main(args=None):
         id_column=parsed.id_column,
         min_overlap_threshold=parsed.min_overlap_threshold,
         workers=parsed.workers,
+        show_progress=True,
     )
 
-    logger.info(
-        "Successfully extracted %d attributes for %d catchments. Saved to %s",
-        df.shape[1],
-        df.shape[0],
-        parsed.output,
+    print(
+        f"\n✓ Extracted {df.shape[1]} attributes for {df.shape[0]} catchments -> {parsed.output}"
     )
   finally:
     if parsed.clean_cache and cache_root.exists():
       import shutil
-      logger.info("Cleaning up cache root directory %s...", cache_root)
+      logger.debug("Cleaning up cache root directory %s...", cache_root)
       shutil.rmtree(cache_root, ignore_errors=True)
 
 

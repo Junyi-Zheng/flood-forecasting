@@ -393,7 +393,7 @@ class ERA5ClimateLoader:
             pass
       if target_ids is None:
         self.loaded_continents.add(continent_code)
-      logger.info(
+      logger.debug(
           "Loaded %d Level 12 climate records for continent '%s'", count, continent_code
       )
 
