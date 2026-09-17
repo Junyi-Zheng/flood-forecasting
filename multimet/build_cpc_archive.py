@@ -14,17 +14,19 @@
 
 """ETL pipeline to build the unified Open-MultiMet daily CPC surface archive.
 
-Ingests NOAA CPC Global Unified Daily Precipitation from NOAA PSL (Physical
-Sciences Laboratory) yearly NetCDF archives:
-  https://downloads.psl.noaa.gov/Datasets/cpc_global_precip/precip.{year}.nc
+Ingests NOAA CPC Global Unified Daily Precipitation from the NOAA PSL (Physical
+Sciences Laboratory) yearly NetCDF archives published at
+``https://downloads.psl.noaa.gov/Datasets/cpc_global_precip/precip.{year}.nc``.
 
 Standardizes spatial dimensions to the Caravan MultiMet specification:
-- Dimensions: (time, latitude, longitude)
-- Latitude: 360 points from -89.75 to 89.75 (0.5 deg resolution, ascending)
-- Longitude: 720 points from -179.75 to 179.75 (0.5 deg resolution, shifted from [0, 360])
-- Variable: cpc_precipitation (float32, mm/day, NaN over missing values)
 
-Outputs directly to gs://open-multimet/data/cpc/daily_surface.zarr
+- Dimensions: ``(time, latitude, longitude)``
+- Latitude: 360 points from -89.75 to 89.75 (0.5 deg resolution, ascending)
+- Longitude: 720 points from -179.75 to 179.75 (0.5 deg, shifted from
+  ``[0, 360)``)
+- Variable: ``cpc_precipitation`` (float32, mm/day, NaN over missing values)
+
+Outputs directly to ``gs://open-multimet/data/cpc/daily_surface.zarr``.
 """
 
 from __future__ import annotations
@@ -35,8 +37,9 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
 import time
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 import urllib.request
 
 import fsspec
@@ -49,17 +52,23 @@ import numpy as np
 import pandas as pd
 import tqdm
 import xarray as xr
-import zarr
+
+from multimet.storage import NON_RETRYABLE_ERRORS, resolve_zarr_target
 
 DEFAULT_PROJECT = "global-ungauged-experiments"
 DEFAULT_TARGET_ZARR = "open-multimet/data/cpc/daily_surface.zarr"
-DEFAULT_CACHE_DIR = "/tmp/cpc_cache"
+DEFAULT_CACHE_DIR = os.path.join(tempfile.gettempdir(), "cpc_cache")
+
+# NOAA PSL publishes CPC Global Unified Precipitation from 1979 onwards.
 DEFAULT_START_YEAR = 1979
-DEFAULT_END_YEAR = 2026
+DEFAULT_END_YEAR = datetime.date.today().year
 
 # Standard CPC 0.5 deg coordinates
 CPC_LATS = np.linspace(-89.75, 89.75, 360, dtype=np.float32)
 CPC_LONS = np.linspace(-179.75, 179.75, 720, dtype=np.float32)
+
+# Name of the single data variable written to the archive.
+CPC_VARIABLE = "cpc_precipitation"
 
 NOAA_PSL_URL_TEMPLATE = (
     "https://downloads.psl.noaa.gov/Datasets/cpc_global_precip/precip.{year}.nc"
@@ -231,15 +240,7 @@ def write_batch_to_zarr(
     max_retries: int = 5,
 ) -> None:
   """Writes or appends a batch of dates to the target Zarr store with exponential retries."""
-  if target_zarr_url.startswith("/") or target_zarr_url.startswith("./"):
-    full_url = target_zarr_url
-    is_gcs = False
-  elif target_zarr_url.startswith("gs://"):
-    full_url = target_zarr_url
-    is_gcs = True
-  else:
-    full_url = f"gs://{target_zarr_url}"
-    is_gcs = True
+  full_url, is_gcs = resolve_zarr_target(target_zarr_url)
 
   clean_path = full_url.replace("gs://", "") if is_gcs else full_url
 
@@ -252,8 +253,7 @@ def write_batch_to_zarr(
         else:
           mapper = fsspec.get_mapper(full_url)
       else:
-        mapper = target_zarr_url
-
+        mapper = full_url
 
       if is_initial_write:
         logging.info("Writing initial Zarr schema to %s...", full_url)
@@ -281,6 +281,10 @@ def write_batch_to_zarr(
         )
         logging.info("✓ Successfully appended dates.")
       return
+    except NON_RETRYABLE_ERRORS:
+      # A missing storage driver or a malformed location will fail the same
+      # way on every attempt, so retrying only delays the real error.
+      raise
     except Exception as e:
       wait_secs = 5 * (2**attempt)
       logging.warning(
@@ -373,15 +377,7 @@ def build_cpc_archive(
   logging.basicConfig(
       level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
   )
-  if target_zarr.startswith("/") or target_zarr.startswith("./"):
-    full_target_url = target_zarr
-    is_gcs = False
-  elif target_zarr.startswith("gs://"):
-    full_target_url = target_zarr
-    is_gcs = True
-  else:
-    full_target_url = f"gs://{target_zarr}"
-    is_gcs = True
+  full_target_url, is_gcs = resolve_zarr_target(target_zarr)
 
   clean_target = (
       full_target_url.replace("gs://", "") if is_gcs else full_target_url
@@ -602,140 +598,94 @@ def build_cpc_archive(
       pass
 
 
-try:
-  from absl import flags
-  FLAGS = flags.FLAGS
-  flags.DEFINE_integer(
-      "start_year", DEFAULT_START_YEAR, "Start year (e.g. 1979)"
+def build_arg_parser() -> argparse.ArgumentParser:
+  """Builds the command-line parser for the CPC archive builder."""
+  parser = argparse.ArgumentParser(
+      prog="build-cpc-archive",
+      description="Build the unified CPC daily precipitation archive.",
   )
-  flags.DEFINE_integer("end_year", DEFAULT_END_YEAR, "End year (e.g. 2026)")
-  flags.DEFINE_string(
-      "start_date", None, "Optional start date filter (YYYY-MM-DD)"
+  parser.add_argument(
+      "--start_year",
+      type=int,
+      default=DEFAULT_START_YEAR,
+      help="First NOAA PSL yearly file to ingest (e.g. 1979).",
   )
-  flags.DEFINE_string("end_date", None, "Optional end date filter (YYYY-MM-DD)")
-  flags.DEFINE_string("target_zarr", DEFAULT_TARGET_ZARR, "GCS target path")
-  flags.DEFINE_string("project", DEFAULT_PROJECT, "GCP project ID")
-  flags.DEFINE_string("cache_dir", DEFAULT_CACHE_DIR, "Local NetCDF cache dir")
-  flags.DEFINE_boolean(
-      "cleanup_cache",
-      False,
-      "Remove downloaded NetCDF files after writing to Zarr",
+  parser.add_argument(
+      "--end_year",
+      type=int,
+      default=DEFAULT_END_YEAR,
+      help="Last NOAA PSL yearly file to ingest (inclusive).",
   )
-  flags.DEFINE_boolean("overwrite", False, "Overwrite existing store")
-  flags.DEFINE_integer(
-      "num_workers",
-      min(32, os.cpu_count() or 4),
-      "Number of parallel extraction workers",
+  parser.add_argument(
+      "--start_date",
+      type=str,
+      default=None,
+      help="Optional lower bound date filter within the year range.",
   )
-except Exception:
-  FLAGS = None
+  parser.add_argument(
+      "--end_date",
+      type=str,
+      default=None,
+      help="Optional upper bound date filter within the year range.",
+  )
+  parser.add_argument(
+      "--target_zarr",
+      type=str,
+      default=DEFAULT_TARGET_ZARR,
+      help="Destination Zarr store (GCS path, or a local path for testing).",
+  )
+  parser.add_argument(
+      "--project",
+      type=str,
+      default=DEFAULT_PROJECT,
+      help="GCP project used for billing/authentication of GCS requests.",
+  )
+  parser.add_argument(
+      "--cache_dir",
+      type=str,
+      default=DEFAULT_CACHE_DIR,
+      help="Local directory used to cache downloaded NOAA PSL NetCDF files.",
+  )
+  parser.add_argument(
+      "--cleanup_cache",
+      action="store_true",
+      help="Delete downloaded NetCDF files once they have been written.",
+  )
+  parser.add_argument(
+      "--overwrite",
+      action="store_true",
+      help="Delete and rebuild the target store instead of resuming it.",
+  )
+  parser.add_argument(
+      "--num_workers",
+      type=int,
+      default=min(32, os.cpu_count() or 4),
+      help="Number of parallel extraction worker processes.",
+  )
+  return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-  if FLAGS is not None and hasattr(FLAGS, "start_year"):
-    start_year = FLAGS.start_year
-    end_year = FLAGS.end_year
-    start_date = FLAGS.start_date
-    end_date = FLAGS.end_date
-    target_zarr = FLAGS.target_zarr
-    project = FLAGS.project
-    cache_dir = FLAGS.cache_dir
-    cleanup_cache = FLAGS.cleanup_cache
-    overwrite = FLAGS.overwrite
-    num_workers = FLAGS.num_workers
-  else:
-    parser = argparse.ArgumentParser(
-        description="Build unified CPC daily precipitation archive on GCS."
-    )
-    parser.add_argument(
-        "--start_year",
-        type=int,
-        default=DEFAULT_START_YEAR,
-        help="Start year (e.g. 1979)",
-    )
-    parser.add_argument(
-        "--end_year",
-        type=int,
-        default=DEFAULT_END_YEAR,
-        help="End year (e.g. 2026)",
-    )
-    parser.add_argument(
-        "--start_date",
-        type=str,
-        default=None,
-        help="Optional start date filter (YYYY-MM-DD)",
-    )
-    parser.add_argument(
-        "--end_date",
-        type=str,
-        default=None,
-        help="Optional end date filter (YYYY-MM-DD)",
-    )
-    parser.add_argument(
-        "--target_zarr",
-        type=str,
-        default=DEFAULT_TARGET_ZARR,
-        help="GCS target path",
-    )
-    parser.add_argument(
-        "--project", type=str, default=DEFAULT_PROJECT, help="GCP project ID"
-    )
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=DEFAULT_CACHE_DIR,
-        help="Local NetCDF cache dir",
-    )
-    parser.add_argument(
-        "--cleanup_cache",
-        action="store_true",
-        help="Remove downloaded NetCDF files after writing",
-    )
-    parser.add_argument(
-        "--overwrite", action="store_true", help="Overwrite existing store"
-    )
-    parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=min(32, os.cpu_count() or 4),
-        help="Number of parallel extraction worker processes (default: up to 32 cores)",
-    )
-
-    parsed_args, _ = parser.parse_known_args(
-        argv[1:] if argv and len(argv) > 1 else None
-    )
-    start_year = parsed_args.start_year
-    end_year = parsed_args.end_year
-    start_date = parsed_args.start_date
-    end_date = parsed_args.end_date
-    target_zarr = parsed_args.target_zarr
-    project = parsed_args.project
-    cache_dir = parsed_args.cache_dir
-    cleanup_cache = parsed_args.cleanup_cache
-    overwrite = parsed_args.overwrite
-    num_workers = parsed_args.num_workers
-
+  """CLI entry point for ``build-cpc-archive``."""
+  args = build_arg_parser().parse_args(argv)
   build_cpc_archive(
-      start_year=start_year,
-      end_year=end_year,
-      start_date=start_date,
-      end_date=end_date,
-      target_zarr=target_zarr,
-      project=project,
-      cache_dir=cache_dir,
-      cleanup_cache=cleanup_cache,
-      overwrite=overwrite,
-      num_workers=num_workers,
+      start_year=args.start_year,
+      end_year=args.end_year,
+      start_date=args.start_date,
+      end_date=args.end_date,
+      target_zarr=args.target_zarr,
+      project=args.project,
+      cache_dir=args.cache_dir,
+      cleanup_cache=args.cleanup_cache,
+      overwrite=args.overwrite,
+      num_workers=args.num_workers,
   )
-  sys.stdout.flush()
-  sys.stderr.flush()
-  os._exit(0)
-
 
 
 if __name__ == "__main__":
-  try:
-    from absl import app
-    app.run(main)
-  except ImportError:
-    main(sys.argv)
+  main(sys.argv[1:])
+  sys.stdout.flush()
+  sys.stderr.flush()
+  # Hard-exit: worker processes hold open HTTP connections to NOAA PSL that can
+  # otherwise keep the interpreter alive for minutes after the build finishes.
+  os._exit(0)

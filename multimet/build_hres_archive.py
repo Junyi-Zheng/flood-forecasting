@@ -14,19 +14,25 @@
 
 """ETL pipeline to build the unified Open-MultiMet daily HRES surface archive.
 
-Ingests ECMWF IFS HRES forecasts from three sources:
-1. WeatherBench 2 (2016-01-01 to 2023-01-10): Zarr archive
-2. Google Flood Forecasting (2023-01-11 to 2023-07-11): 00z NetCDF archive
-3. ECMWF Open Data (2023-07-12 to Present): Operational GRIB2 archive
+Ingests ECMWF IFS HRES forecasts from three sources, each covering a disjoint
+slice of the timeline:
+
+#. WeatherBench 2 (2016-01-01 to 2023-01-10): public Zarr archive.
+#. Google Flood Forecasting (2023-01-11 to 2023-07-12): 00z NetCDF archive.
+#. ECMWF Open Data (2023-07-13 to present): operational GRIB2 archive.
 
 Aggregates each daily 00z forecast initialization into 10 daily lead steps:
-- temperature_2m: 24h mean (K)
-- surface_pressure: 24h mean (Pa)
-- total_precipitation: 24h accumulated interval (m)
-- surface_net_solar_radiation: 24h flux / accumulation (J/m^2 or W/m^2)
-- surface_net_thermal_radiation: 24h flux / accumulation (J/m^2 or W/m^2)
 
-Outputs directly to gs://open-multimet/data/hres/daily_surface.zarr
+- ``temperature_2m``: 24h mean (K)
+- ``surface_pressure``: 24h mean (Pa)
+- ``total_precipitation``: 24h accumulated interval (m)
+- ``surface_net_solar_radiation``: 24h accumulation (J/m^2)
+- ``surface_net_thermal_radiation``: 24h accumulation (J/m^2)
+
+Dates that cannot be retrieved from any source are written as all-NaN slices so
+that the time axis stays contiguous.
+
+Outputs directly to ``gs://open-multimet/data/hres/daily_surface.zarr``.
 """
 
 from __future__ import annotations
@@ -36,7 +42,7 @@ import datetime
 import logging
 import os
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import fsspec
 try:
@@ -44,21 +50,13 @@ try:
 except ImportError:
   gcsfs = None
 
-try:
-  from cloud.bigstore.util import bigstore_file_register
-except ImportError:
-  pass
-
-try:
-  from pyglib import gfile
-except ImportError:
-  gfile = None
-
 import numpy as np
 import pandas as pd
 import tqdm
 import xarray as xr
 import zarr
+
+from multimet.storage import NON_RETRYABLE_ERRORS, resolve_zarr_target
 
 DEFAULT_PROJECT = "global-ungauged-experiments"
 DEFAULT_TARGET_ZARR = "open-multimet/data/hres/daily_surface.zarr"
@@ -68,18 +66,74 @@ FLOOD_FORECASTING_NC_PATTERN = (
 )
 ECMWF_OPEN_DATA_PREFIX = "ecmwf-open-data"
 
+# First forecast initialization date available in WeatherBench 2.
+DEFAULT_START_DATE = "2016-01-01"
+
 WB2_CUTOFF_DATE = pd.Timestamp("2023-01-10")
 OPEN_DATA_START_DATE = pd.Timestamp("2023-07-13")
 
 LEAD_STEPS_WB2 = [24, 48, 72, 96, 120, 144, 168, 192, 216, 240]
+
+# Number of daily lead steps (lead day 1 .. 10) stored for every init date.
+NUM_LEAD_DAYS = 10
+
+# Canonical 0.25 degree HRES grid used by the unified archive.
+HRES_LATS = np.linspace(-90.0, 90.0, 721, dtype=np.float32)
+HRES_LONS = np.linspace(0.0, 359.75, 1440, dtype=np.float32)
+
+# Surface variables written to the archive, in canonical order.
+HRES_VARIABLES = (
+    "temperature_2m",
+    "surface_pressure",
+    "total_precipitation",
+    "surface_net_solar_radiation",
+    "surface_net_thermal_radiation",
+)
+
+HRES_ATTRS = {
+    "title": "Open-MultiMet ECMWF HRES Daily Surface Forecast Archive",
+    "spatial_resolution": "0.25 degree",
+    "description": (
+        "Daily-aggregated surface forecast variables (lead days 1..10) from"
+        " ECMWF IFS HRES"
+    ),
+    "license": "CC-BY-4.0",
+    "institution": "ECMWF / Open-MultiMet",
+}
+
+
+def deaccumulate(
+    accumulated: np.ndarray, clip_negative: bool = False
+) -> np.ndarray:
+  """Converts a run-cumulative forecast stack into per-lead-day increments.
+
+  ECMWF reports ``tp``, ``ssr`` and ``str`` as totals accumulated since the
+  forecast initialization time, so lead day ``d`` must be differenced against
+  lead day ``d - 1`` to recover the value for that day alone. Lead day 1 is
+  already a single-day total and is passed through unchanged.
+
+  Args:
+    accumulated: Array whose leading axis is the lead-day axis.
+    clip_negative: If ``True``, negative increments are floored at zero. Use
+      this for precipitation, where a negative increment can only be numerical
+      noise. Radiation fluxes are genuinely signed and must not be clipped.
+
+  Returns:
+    An array of the same shape holding per-lead-day increments.
+  """
+  daily = np.empty_like(accumulated)
+  daily[0] = accumulated[0]
+  difference = accumulated[1:] - accumulated[:-1]
+  daily[1:] = np.maximum(0.0, difference) if clip_negative else difference
+  return daily
 
 
 class WeatherBench2Source:
   """Extracts daily aggregates from WeatherBench 2 HRES Zarr archive."""
 
   def __init__(self, zarr_path: str = WB2_HRES_ZARR):
-    full_path = zarr_path if zarr_path.startswith("gs://") else f"gs://{zarr_path}"
-    if gcsfs is not None:
+    full_path, is_remote = resolve_zarr_target(zarr_path)
+    if is_remote and gcsfs is not None:
       fs = gcsfs.GCSFileSystem(token="anon")
       self.mapper = fs.get_mapper(full_path.replace("gs://", ""))
       self.ds = xr.open_zarr(self.mapper, decode_timedelta=False)
@@ -165,8 +219,11 @@ class FloodForecastingGapSource:
     exists = False
     if self.fs is not None:
       exists = self.fs.exists(clean_path) or self.fs.exists(full_path)
-    elif gfile is not None:
-      exists = gfile.Exists(full_path)
+    else:
+      try:
+        exists = fsspec.filesystem("gs").exists(clean_path)
+      except Exception:  # noqa: BLE001 - treat any lookup failure as "absent".
+        exists = False
 
     if not exists:
       return None
@@ -174,8 +231,6 @@ class FloodForecastingGapSource:
     try:
       if self.fs is not None:
         opener = self.fs.open(clean_path)
-      elif gfile is not None:
-        opener = gfile.Open(full_path, "rb")
       else:
         opener = fsspec.open(full_path, "rb")
 
@@ -269,28 +324,20 @@ class ECMWFOpenDataSource:
             else:
               raw_steps[param].append(np.full((len(target_lat), len(target_lon)), np.nan, dtype=np.float32))
 
-      tp_stack = np.stack(raw_steps["tp"], axis=0)
-      ssr_stack = np.stack(raw_steps["ssr"], axis=0)
-      str_stack = np.stack(raw_steps["str"], axis=0)
-
-      daily_tp = np.empty_like(tp_stack)
-      daily_tp[0] = tp_stack[0]
-      daily_tp[1:] = np.maximum(0.0, tp_stack[1:] - tp_stack[:-1])
-
-      daily_ssr = np.empty_like(ssr_stack)
-      daily_ssr[0] = ssr_stack[0]
-      daily_ssr[1:] = ssr_stack[1:] - ssr_stack[:-1]
-
-      daily_str = np.empty_like(str_stack)
-      daily_str[0] = str_stack[0]
-      daily_str[1:] = str_stack[1:] - str_stack[:-1]
-
       return {
           "temperature_2m": np.stack(raw_steps["2t"], axis=0),
           "surface_pressure": np.stack(raw_steps["sp"], axis=0),
-          "total_precipitation": daily_tp,
-          "surface_net_solar_radiation": daily_ssr,
-          "surface_net_thermal_radiation": daily_str,
+          # ECMWF publishes tp/ssr/str as totals accumulated since the forecast
+          # initialization, so they must be differenced into daily increments.
+          "total_precipitation": deaccumulate(
+              np.stack(raw_steps["tp"], axis=0), clip_negative=True
+          ),
+          "surface_net_solar_radiation": deaccumulate(
+              np.stack(raw_steps["ssr"], axis=0)
+          ),
+          "surface_net_thermal_radiation": deaccumulate(
+              np.stack(raw_steps["str"], axis=0)
+          ),
       }
     except Exception as e:
       logging.warning("Error decoding Open Data for %s: %s", date_str, e)
@@ -350,17 +397,53 @@ def _extract_single_date(
         "No data found for date %s, inserting NaN slice",
         dt.strftime("%Y-%m-%d"),
     )
-    nan_grid = np.full(
-        (10, len(_target_lat), len(_target_lon)), np.nan, dtype=np.float32
-    )
+    shape = (NUM_LEAD_DAYS, len(_target_lat), len(_target_lon))
     date_data = {
-        "temperature_2m": nan_grid,
-        "surface_pressure": nan_grid.copy(),
-        "total_precipitation": nan_grid.copy(),
-        "surface_net_solar_radiation": nan_grid.copy(),
-        "surface_net_thermal_radiation": nan_grid.copy(),
+        var: np.full(shape, np.nan, dtype=np.float32)
+        for var in HRES_VARIABLES
     }
   return dt, date_data
+
+
+def build_batch_dataset(
+    batch_dates: Sequence[pd.Timestamp],
+    batch_data: Dict[str, Sequence[np.ndarray]],
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+) -> xr.Dataset:
+  """Assembles one write batch into the canonical HRES archive schema.
+
+  This is the single definition of the archive's on-disk layout. Every write
+  path (parallel, sequential, and the trailing partial batch) goes through it,
+  which guarantees the dimension order, coordinates, dtypes, and global
+  attributes stay identical across the whole store.
+
+  Args:
+    batch_dates: Forecast initialization dates in the batch, in write order.
+    batch_data: Mapping of variable name to a list of ``(lead_time, lat, lon)``
+      arrays, one per entry in ``batch_dates``.
+    latitudes: Latitude coordinate values of the target grid.
+    longitudes: Longitude coordinate values of the target grid.
+
+  Returns:
+    An ``xarray.Dataset`` with dims ``(time, lead_time, latitude, longitude)``.
+  """
+  return xr.Dataset(
+      data_vars={
+          var: (
+              ["time", "lead_time", "latitude", "longitude"],
+              np.stack(values, axis=0),
+          )
+          for var, values in batch_data.items()
+      },
+      coords={
+          "time": list(batch_dates),
+          "lead_time": np.arange(1, NUM_LEAD_DAYS + 1, dtype=np.int32),
+          "latitude": latitudes,
+          "longitude": longitudes,
+      },
+      attrs=dict(HRES_ATTRS),
+  )
 
 
 def write_batch_to_zarr(
@@ -372,14 +455,10 @@ def write_batch_to_zarr(
     max_retries: int = 5,
 ) -> None:
   """Writes or appends a batch of dates to the target Zarr store with retries."""
-  is_local = target_zarr_url.startswith("/") or target_zarr_url.startswith("./")
-  if is_local:
-    full_url = target_zarr_url
-    clean_path = target_zarr_url
-    mapper = target_zarr_url
-  else:
-    full_url = target_zarr_url if target_zarr_url.startswith("gs://") else f"gs://{target_zarr_url}"
-    clean_path = full_url.replace("gs://", "")
+  full_url, is_remote = resolve_zarr_target(target_zarr_url)
+  is_local = not is_remote
+  clean_path = full_url.replace("gs://", "") if is_remote else full_url
+  mapper = full_url
 
   for attempt in range(max_retries):
     try:
@@ -401,6 +480,10 @@ def write_batch_to_zarr(
         logging.info("Appending %d dates along time dimension...", len(ds_batch["time"]))
         ds_batch.to_zarr(mapper, mode="a", append_dim="time", consolidated=consolidated)
       return
+    except NON_RETRYABLE_ERRORS:
+      # A missing storage driver or a malformed location will fail the same
+      # way on every attempt, so retrying only delays the real error.
+      raise
     except Exception as e:
       wait_secs = 5 * (2 ** attempt)
       logging.warning(
@@ -424,15 +507,14 @@ def write_batch_in_place(
     max_retries: int = 5,
 ) -> None:
   """Writes a batch of dates directly in-place into existing Zarr array slices."""
-  is_local = target_zarr_url.startswith("/") or target_zarr_url.startswith("./")
-  if is_local:
-    mapper = target_zarr_url
+  full_url, is_remote = resolve_zarr_target(target_zarr_url)
+  if not is_remote:
+    mapper = full_url
   elif gcsfs is not None:
     fs = gcsfs.GCSFileSystem(project=project, requester_pays=project)
-    clean_path = target_zarr_url.replace("gs://", "")
-    mapper = fs.get_mapper(clean_path)
+    mapper = fs.get_mapper(full_url.replace("gs://", ""))
   else:
-    mapper = fsspec.get_mapper(target_zarr_url)
+    mapper = fsspec.get_mapper(full_url)
 
   root = zarr.open_group(mapper, mode="r+")
 
@@ -445,7 +527,11 @@ def write_batch_in_place(
   indices = [date_to_idx.get(t.strftime("%Y-%m-%d")) for t in batch_dates]
 
   if any(idx is None for idx in indices):
-    missing = [t.strftime("%Y-%m-%d") for t, idx in zip(batch_dates, indices) if idx is None]
+    missing = [
+        t.strftime("%Y-%m-%d")
+        for t, idx in zip(batch_dates, indices, strict=True)
+        if idx is None
+    ]
     raise ValueError(f"Cannot write in-place: dates {missing} not in target Zarr time coordinate.")
 
   is_contiguous = indices[-1] - indices[0] == len(indices) - 1 and indices == list(range(indices[0], indices[-1] + 1))
@@ -493,13 +579,11 @@ def build_hres_archive(
 ) -> None:
   """Main entry point to execute the HRES archive build."""
   logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-  is_local = target_zarr.startswith("/") or target_zarr.startswith("./")
-  if is_local:
-    full_target_url = target_zarr
-    clean_target = target_zarr
-  else:
-    full_target_url = target_zarr if target_zarr.startswith("gs://") else f"gs://{target_zarr}"
-    clean_target = full_target_url.replace("gs://", "")
+  full_target_url, is_remote = resolve_zarr_target(target_zarr)
+  is_local = not is_remote
+  clean_target = (
+      full_target_url.replace("gs://", "") if is_remote else full_target_url
+  )
 
   if num_workers is None or num_workers <= 0:
     num_workers = min(32, os.cpu_count() or 4)
@@ -594,16 +678,34 @@ def build_hres_archive(
   is_first_write = not store_exists or overwrite
 
   batch_dates = []
-  batch_data = {
-      "temperature_2m": [],
-      "surface_pressure": [],
-      "total_precipitation": [],
-      "surface_net_solar_radiation": [],
-      "surface_net_thermal_radiation": [],
-  }
+  batch_data = {var: [] for var in HRES_VARIABLES}
 
-  target_lat = np.linspace(-90.0, 90.0, 721, dtype=np.float32)
-  target_lon = np.linspace(0.0, 359.75, 1440, dtype=np.float32)
+  target_lat = HRES_LATS
+  target_lon = HRES_LONS
+
+  def flush_batch() -> None:
+    """Writes the currently accumulated batch and resets the accumulators."""
+    nonlocal batch_dates, batch_data, is_first_write
+    if not batch_dates:
+      return
+    ds_batch = build_batch_dataset(
+        batch_dates, batch_data, target_lat, target_lon
+    )
+    if in_place:
+      write_batch_in_place(
+          ds_batch, full_target_url, project=project, date_to_idx=date_to_idx
+      )
+    else:
+      write_batch_to_zarr(
+          ds_batch,
+          full_target_url,
+          project=project,
+          is_initial_write=is_first_write,
+          consolidated=has_consolidated,
+      )
+      is_first_write = False
+    batch_dates = []
+    batch_data = {var: [] for var in HRES_VARIABLES}
 
   if num_workers > 1:
     import multiprocessing as mp
@@ -616,40 +718,10 @@ def build_hres_archive(
           iterator, total=len(dates), desc=f"Processing HRES ({num_workers} workers)"
       ):
         batch_dates.append(dt)
-        for k in batch_data.keys():
+        for k in batch_data:
           batch_data[k].append(date_data[k])
-
         if len(batch_dates) >= batch_size:
-          ds_batch = xr.Dataset(
-              data_vars={
-                  k: (["time", "lead_time", "latitude", "longitude"], np.stack(v, axis=0))
-                  for k, v in batch_data.items()
-              },
-              coords={
-                  "time": batch_dates,
-                  "lead_time": np.arange(1, 11, dtype=np.int32),
-                  "latitude": target_lat,
-                  "longitude": target_lon,
-              },
-              attrs={
-                  "title": "Open-MultiMet ECMWF HRES Daily Surface Forecast Archive",
-                  "spatial_resolution": "0.25 degree",
-                  "description": "Daily-aggregated surface forecast variables (lead days 1..10) from ECMWF IFS HRES",
-                  "license": "CC-BY-4.0",
-                  "institution": "ECMWF / Open-MultiMet",
-              },
-          )
-          if in_place:
-            write_batch_in_place(
-                ds_batch, full_target_url, project=project, date_to_idx=date_to_idx
-            )
-          else:
-            write_batch_to_zarr(
-                ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
-            )
-            is_first_write = False
-          batch_dates = []
-          batch_data = {k: [] for k in batch_data.keys()}
+          flush_batch()
   else:
     logging.info("Running extraction sequentially (1 worker)...")
     _init_worker(project)
@@ -658,143 +730,86 @@ def build_hres_archive(
     for dt in tqdm.tqdm(dates, desc="Processing HRES (sequential)"):
       dt, date_data = _extract_single_date(dt)
       batch_dates.append(dt)
-      for k in batch_data.keys():
+      for k in batch_data:
         batch_data[k].append(date_data[k])
-
       if len(batch_dates) >= batch_size:
-        ds_batch = xr.Dataset(
-            data_vars={
-                k: (["time", "lead_time", "latitude", "longitude"], np.stack(v, axis=0))
-                for k, v in batch_data.items()
-            },
-            coords={
-                "time": batch_dates,
-                "lead_time": np.arange(1, 11, dtype=np.int32),
-                "latitude": target_lat,
-                "longitude": target_lon,
-            },
-            attrs={
-                "title": "Open-MultiMet ECMWF HRES Daily Surface Forecast Archive",
-                "spatial_resolution": "0.25 degree",
-                "description": "Daily-aggregated surface forecast variables (lead days 1..10) from ECMWF IFS HRES",
-                "license": "CC-BY-4.0",
-                "institution": "ECMWF / Open-MultiMet",
-            },
-        )
-        if in_place:
-          write_batch_in_place(
-              ds_batch, full_target_url, project=project, date_to_idx=date_to_idx
-          )
-        else:
-          write_batch_to_zarr(
-              ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
-          )
-          is_first_write = False
-        batch_dates = []
-        batch_data = {k: [] for k in batch_data.keys()}
+        flush_batch()
 
-  if batch_dates:
-    ds_batch = xr.Dataset(
-        data_vars={
-            k: (["time", "lead_time", "latitude", "longitude"], np.stack(v, axis=0))
-            for k, v in batch_data.items()
-        },
-        coords={
-            "time": batch_dates,
-            "lead_time": np.arange(1, 11, dtype=np.int32),
-            "latitude": target_lat,
-            "longitude": target_lon,
-        },
-        attrs={
-            "title": "Open-MultiMet ECMWF HRES Daily Surface Forecast Archive",
-            "spatial_resolution": "0.25 degree",
-            "description": "Daily-aggregated surface forecast variables (lead days 1..10) from ECMWF IFS HRES",
-            "license": "CC-BY-4.0",
-            "institution": "ECMWF / Open-MultiMet",
-        },
-    )
-    if in_place:
-      write_batch_in_place(
-          ds_batch, full_target_url, project=project, date_to_idx=date_to_idx
-      )
-    else:
-      write_batch_to_zarr(
-          ds_batch, full_target_url, project=project, is_initial_write=is_first_write, consolidated=has_consolidated
-      )
+  flush_batch()
 
   logging.info("HRES archive build complete for %s to %s!", start_date, end_date)
 
 
-try:
-  from absl import flags
-  FLAGS = flags.FLAGS
-  flags.DEFINE_string("start_date", "2016-01-01", "Start date (YYYY-MM-DD)")
-  flags.DEFINE_string("end_date", "2026-09-14", "End date (YYYY-MM-DD)")
-  flags.DEFINE_string("target_zarr", DEFAULT_TARGET_ZARR, "GCS target path")
-  flags.DEFINE_string("project", DEFAULT_PROJECT, "GCP project ID")
-  flags.DEFINE_integer("batch_size", 10, "Days per write batch")
-  flags.DEFINE_boolean("overwrite", False, "Overwrite existing store")
-  flags.DEFINE_boolean("in_place", False, "Update existing dates in-place in target Zarr store")
-  flags.DEFINE_integer(
-      "num_workers",
-      min(32, os.cpu_count() or 4),
-      "Number of parallel extraction workers",
+def build_arg_parser() -> argparse.ArgumentParser:
+  """Builds the command-line parser for the HRES archive builder."""
+  parser = argparse.ArgumentParser(
+      prog="build-hres-archive",
+      description="Build the unified HRES daily surface forecast archive.",
   )
-except Exception:
-  FLAGS = None
+  parser.add_argument(
+      "--start_date",
+      type=str,
+      default=DEFAULT_START_DATE,
+      help="First forecast initialization date to build (YYYY-MM-DD).",
+  )
+  parser.add_argument(
+      "--end_date",
+      type=str,
+      default=datetime.date.today().isoformat(),
+      help="Last forecast initialization date to build (YYYY-MM-DD).",
+  )
+  parser.add_argument(
+      "--target_zarr",
+      type=str,
+      default=DEFAULT_TARGET_ZARR,
+      help="Destination Zarr store (GCS path, or a local path for testing).",
+  )
+  parser.add_argument(
+      "--project",
+      type=str,
+      default=DEFAULT_PROJECT,
+      help="GCP project used for billing/authentication of GCS requests.",
+  )
+  parser.add_argument(
+      "--batch_size",
+      type=int,
+      default=10,
+      help="Number of forecast dates accumulated before each Zarr write.",
+  )
+  parser.add_argument(
+      "--overwrite",
+      action="store_true",
+      help="Delete and rebuild the target store instead of resuming it.",
+  )
+  parser.add_argument(
+      "--in_place",
+      action="store_true",
+      help="Rewrite dates that already exist in the target store in place.",
+  )
+  parser.add_argument(
+      "--num_workers",
+      type=int,
+      default=min(32, os.cpu_count() or 4),
+      help="Number of parallel extraction worker processes.",
+  )
+  return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-  if FLAGS is not None and hasattr(FLAGS, "start_date"):
-    start_date = FLAGS.start_date
-    end_date = FLAGS.end_date
-    target_zarr = FLAGS.target_zarr
-    project = FLAGS.project
-    batch_size = FLAGS.batch_size
-    overwrite = FLAGS.overwrite
-    in_place = getattr(FLAGS, "in_place", False)
-    num_workers = FLAGS.num_workers
-  else:
-    parser = argparse.ArgumentParser(description="Build unified HRES daily surface archive on GCS.")
-    parser.add_argument("--start_date", type=str, default="2016-01-01", help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end_date", type=str, default="2026-09-14", help="End date (YYYY-MM-DD)")
-    parser.add_argument("--target_zarr", type=str, default=DEFAULT_TARGET_ZARR, help="GCS target path")
-    parser.add_argument("--project", type=str, default=DEFAULT_PROJECT, help="GCP project ID")
-    parser.add_argument("--batch_size", type=int, default=10, help="Days per write batch")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing store")
-    parser.add_argument("--in_place", action="store_true", help="Update existing dates in-place in target Zarr store")
-    parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=min(32, os.cpu_count() or 4),
-        help="Number of parallel extraction worker processes (default: up to 32 cores)",
-    )
-    parsed_args, _ = parser.parse_known_args(argv[1:] if argv and len(argv) > 1 else None)
-    start_date = parsed_args.start_date
-    end_date = parsed_args.end_date
-    target_zarr = parsed_args.target_zarr
-    project = parsed_args.project
-    batch_size = parsed_args.batch_size
-    overwrite = parsed_args.overwrite
-    in_place = parsed_args.in_place
-    num_workers = parsed_args.num_workers
-
+  """CLI entry point for ``build-hres-archive``."""
+  args = build_arg_parser().parse_args(argv)
   build_hres_archive(
-      start_date=start_date,
-      end_date=end_date,
-      target_zarr=target_zarr,
-      project=project,
-      batch_size=batch_size,
-      overwrite=overwrite,
-      in_place=in_place,
-      num_workers=num_workers,
+      start_date=args.start_date,
+      end_date=args.end_date,
+      target_zarr=args.target_zarr,
+      project=args.project,
+      batch_size=args.batch_size,
+      overwrite=args.overwrite,
+      in_place=args.in_place,
+      num_workers=args.num_workers,
   )
 
 
 if __name__ == "__main__":
-  try:
-    from absl import app
-    app.run(main)
-  except ImportError:
-    main(sys.argv)
+  main(sys.argv[1:])
 
