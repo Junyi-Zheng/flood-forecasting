@@ -398,9 +398,8 @@ class TestWriteBatchInPlace:
 class TestSourceDispatch:
   """``_extract_single_date`` routes each date window to the right source.
 
-  The gap source was previously assigned in ``_init_worker`` but never read, so
-  every date in 2023-01-11..2023-07-12 was silently written as NaN regardless of
-  what had been staged. These tests pin the routing for all three windows.
+  Tests routing across WeatherBench 2 (<= 2023-01-10), the Flood Forecasting NetCDF
+  gap archive (2023-01-11 to 2023-07-12), and ECMWF Open Data (>= 2023-07-13).
   """
 
   @staticmethod
