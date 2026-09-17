@@ -370,10 +370,11 @@ def _extract_single_date(
       if dt <= WB2_CUTOFF_DATE:
         date_data = _worker_wb2.extract_date(dt)
       elif dt < OPEN_DATA_START_DATE:
-        # 6-month gap between WeatherBench 2 (2023-01-10) and ECMWF Open Data (2023-07-13).
-        # Fill with NaN slice (to be backfilled from local CNS / internal storage).
-        date_data = None
-        break
+        # Six-month gap between the end of WeatherBench 2 (2023-01-10) and the
+        # start of ECMWF Open Data (2023-07-13). Served from the Flood
+        # Forecasting NetCDF archive, which has to be staged separately; dates
+        # with nothing staged fall through to the NaN slice below.
+        date_data = _worker_gap.extract_date(dt, _target_lat, _target_lon)
       else:
         date_data = _worker_open_data.extract_date(dt, _target_lat, _target_lon)
       if date_data is not None:

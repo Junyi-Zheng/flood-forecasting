@@ -395,6 +395,98 @@ class TestWriteBatchInPlace:
       write_batch_in_place(replacement, populated_store)
 
 
+class TestSourceDispatch:
+  """``_extract_single_date`` routes each date window to the right source.
+
+  The gap source was previously assigned in ``_init_worker`` but never read, so
+  every date in 2023-01-11..2023-07-12 was silently written as NaN regardless of
+  what had been staged. These tests pin the routing for all three windows.
+  """
+
+  @staticmethod
+  def _install(monkeypatch: pytest.MonkeyPatch) -> Dict[str, List[pd.Timestamp]]:
+    """Installs a recording stub for each source and returns the call log."""
+    calls: Dict[str, List[pd.Timestamp]] = {"wb2": [], "gap": [], "open": []}
+    shape = (NUM_LEAD_DAYS, len(FAKE_HRES_LATS), len(FAKE_HRES_LONS))
+
+    class Recorder:
+
+      def __init__(self, key: str):
+        self.key = key
+
+      def extract_date(
+          self, date: pd.Timestamp, *args: object, **kwargs: object
+      ) -> Dict[str, np.ndarray]:
+        calls[self.key].append(date)
+        return {
+            var: np.full(shape, 1.0, dtype=np.float32) for var in HRES_VARIABLES
+        }
+
+    monkeypatch.setattr(hres_module, "_worker_wb2", Recorder("wb2"))
+    monkeypatch.setattr(hres_module, "_worker_gap", Recorder("gap"))
+    monkeypatch.setattr(hres_module, "_worker_open_data", Recorder("open"))
+    monkeypatch.setattr(hres_module, "_target_lat", FAKE_HRES_LATS)
+    monkeypatch.setattr(hres_module, "_target_lon", FAKE_HRES_LONS)
+    return calls
+
+  @pytest.mark.parametrize(
+      ("date", "expected"),
+      [
+          ("2020-06-01", "wb2"),
+          ("2023-01-10", "wb2"),
+          ("2023-01-11", "gap"),
+          ("2023-04-15", "gap"),
+          ("2023-07-12", "gap"),
+          ("2023-07-13", "open"),
+          ("2024-06-01", "open"),
+      ],
+  )
+  def test_routes_to_expected_source(
+      self, monkeypatch: pytest.MonkeyPatch, date: str, expected: str
+  ) -> None:
+    calls = self._install(monkeypatch)
+
+    _, payload = hres_module._extract_single_date(pd.Timestamp(date))
+
+    assert calls[expected] == [pd.Timestamp(date)]
+    for other in set(calls) - {expected}:
+      assert calls[other] == [], f"{other} source was consulted for {date}"
+    assert not np.isnan(payload["temperature_2m"]).any()
+
+  def test_gap_dates_are_not_unconditionally_nan(
+      self, monkeypatch: pytest.MonkeyPatch
+  ) -> None:
+    """Regression: the gap window must honour staged data when it exists."""
+    calls = self._install(monkeypatch)
+
+    for date in pd.date_range("2023-01-11", "2023-07-12", freq="30D"):
+      _, payload = hres_module._extract_single_date(date)
+      assert not np.isnan(payload["total_precipitation"]).any()
+
+    assert len(calls["gap"]) == 7
+    assert calls["wb2"] == []
+    assert calls["open"] == []
+
+  def test_gap_falls_back_to_nan_when_nothing_is_staged(
+      self, monkeypatch: pytest.MonkeyPatch
+  ) -> None:
+    """An unstaged gap date still yields a NaN slice rather than raising."""
+    self._install(monkeypatch)
+
+    class Absent:
+
+      def extract_date(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(hres_module, "_worker_gap", Absent())
+
+    _, payload = hres_module._extract_single_date(pd.Timestamp("2023-04-15"))
+
+    assert set(payload) == set(HRES_VARIABLES)
+    for values in payload.values():
+      assert bool(np.isnan(values).all())
+
+
 class TestMissingDataFallback:
   """``_extract_single_date`` when every upstream source comes up empty."""
 
