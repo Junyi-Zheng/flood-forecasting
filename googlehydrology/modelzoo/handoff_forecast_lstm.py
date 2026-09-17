@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -29,9 +30,13 @@ FC_XAVIER = WeightInitOpt.FC_XAVIER
 
 
 def _concat_dynamic_features(
-    data: dict[str, torch.Tensor], feature_names: list[str]
+    data: dict[str, torch.Tensor], *, keys: Iterable[str]
 ) -> torch.Tensor:
     """Concatenate dynamic features in the model-defined feature order."""
+    feature_names = list(keys)
+    missing = [name for name in feature_names if name not in data]
+    if missing:
+        raise KeyError(f'Missing dynamic features in batch: {missing}')
     return torch.cat([data[name] for name in feature_names], dim=-1)
 
 
@@ -255,10 +260,10 @@ class HandoffForecastLSTM(BaseModel):
 
         # Run the embedding layers.
         hindcast_features = _concat_dynamic_features(
-            data['x_d_hindcast'], self.hindcast_inputs
+            data['x_d_hindcast'], keys=self.hindcast_inputs
         )
         forecast_features = _concat_dynamic_features(
-            data['x_d_forecast'], self.forecast_inputs
+            data['x_d_forecast'], keys=self.forecast_inputs
         )
 
         statics_embeddings = self.statics_embedding_net(data['x_s'])
@@ -458,7 +463,7 @@ class HandoffForecastLSTM(BaseModel):
         """
         # Run the embedding layers.
         hindcast_features = _concat_dynamic_features(
-            data['x_d_hindcast'], self.hindcast_inputs
+            data['x_d_hindcast'], keys=self.hindcast_inputs
         )
 
         statics_embeddings = self.statics_embedding_net(data['x_s'])
@@ -476,7 +481,7 @@ class HandoffForecastLSTM(BaseModel):
 
         # We run the exact same logic up to the final temporal state (Day D)
         forecast_features = _concat_dynamic_features(
-            data['x_d_forecast'], self.forecast_inputs
+            data['x_d_forecast'], keys=self.forecast_inputs
         )
 
         forecast_embeddings = self.forecast_embedding_net(forecast_features)
