@@ -92,6 +92,22 @@ A small sample is provided in tutorial/data/Caravan-nc. For full runs:
 
 The MultiMet forcing data extension is accessed directly from **Google Cloud Storage**. Ensure your configuration points to: gs://caravan-multimet/v1.1
 
+#### Building the underlying gridded archives
+
+The [`multimet`](multimet/README.md) package contains the ETL pipelines that
+assemble the unified gridded meteorological archives that MultiMet is derived
+from. You only need these if you are *producing* or *updating* the archives;
+consuming MultiMet requires nothing beyond the GCS path above.
+
+| Command | Product | Resolution | Coverage |
+| --- | --- | --- | --- |
+| `build-cpc-archive` | NOAA CPC Global Unified daily precipitation | 0.5° | 1979 → present |
+| `build-hres-archive` | ECMWF IFS HRES daily surface forecast, lead days 1–10 | 0.25° | 2016 → present |
+
+See the [gridded archive builders guide](multimet/README.md) for source
+provenance, output schemas, and operational details (resume, overwrite, and
+in-place repair).
+
 ## **Usage**
 
 The package installs the run command as the primary entry point.
@@ -147,6 +163,43 @@ The `~/flood-forecasting/example-configs` directory contains reference YAML file
   * **Model Architecture:** `handoff_forecast_lstm`  
   * **Dataset:** CAMELS-US (531 basins)  
   * **Description:** A benchmarking configuration for the State Handoff model tailored for the CAMELS-US dataset, used to compare the handoff approach against other architectures on US-based basin data.
+
+## **Verification: tests, benchmarks, canaries, and audits**
+
+The data-engineering subpackages ship several kinds of automated check. They
+are not interchangeable, and the distinction determines whether a failure
+should block a merge:
+
+| Kind | Question it answers | Data source | Fails when | Gates a PR? |
+| --- | --- | --- | --- | --- |
+| **Test** | Is the code correct? | Synthetic, local, hermetic | You broke something | **Yes** |
+| **Benchmark** | Is the output *accurate*? | Frozen reference dataset | Your algorithm regressed | No — run on demand |
+| **Canary** | Is the *upstream feed* still working? | Live third-party services | Someone else broke something | **Never** |
+| **Audit** | Is a *published archive* intact? | The archive in GCS | A past run wrote bad data | No — run on demand |
+
+The rule of thumb: **a benchmark fails when you break something; a canary fails
+when someone else does.** That is why a benchmark may gate a release but a
+canary must never gate a merge — otherwise a third-party outage blocks the
+team.
+
+Where each one lives today:
+
+* **Tests** — `test/`, `multimet/test/`. Run on every PR.
+* **Benchmarks** — accuracy scoring against published reference data:
+  catchment delineation (IoU / Dice against reference polygons) and Caravan
+  static attributes (correlation against published values).
+* **Canaries** — `multimet/test/test_canary.py`, covering NOAA PSL,
+  WeatherBench 2, and ECMWF Open Data. Skipped by default; opt in with
+  `--run-canary`. A nightly
+  [`multimet canary`](.github/workflows/multimet-canary.yml) workflow runs them
+  on a schedule and has no `pull_request` trigger by design.
+* **Audits** — one-off validations of a published Zarr store (contiguous time
+  axis, no duplicate dates, plausible spatial extent).
+
+```bash
+pytest multimet/test                      # tests only; canaries are skipped
+pytest multimet/test --run-canary -m canary   # canaries only, hits the network
+```
 
 ## **Issue Reporting**
 

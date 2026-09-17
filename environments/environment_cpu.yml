@@ -30,6 +30,7 @@ dependencies:
   - bokeh=3.8.*
   - cachey=0.2.*
   - dask=2025.12.*
+  - fsspec
   - gcsfs=2025.12.*
   - geopandas=1.1.*
   - gh
