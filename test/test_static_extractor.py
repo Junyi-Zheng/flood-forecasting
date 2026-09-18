@@ -220,6 +220,12 @@ def test_era5_gridded_extractor_synthetic(tmp_path):
   t_data = np.full((n_times, len(lats), len(lons)), 18.0, dtype=np.float32)
   pet_data = np.full((n_times, len(lats), len(lons)), 2.0, dtype=np.float32)
 
+  # Mask out a corner of the grid with NaNs (e.g., coastal water cells) to
+  # verify spatial weights are renormalized over valid land cells.
+  p_data[:, :4, :4] = np.nan
+  t_data[:, :4, :4] = np.nan
+  pet_data[:, :4, :4] = np.nan
+
   root.create_array("era5land_total_precipitation", data=p_data)
   root.create_array("era5land_temperature_2m", data=t_data)
   root.create_array("era5land_potential_evaporation_FAO_PENMAN_MONTEITH", data=pet_data)
@@ -230,9 +236,15 @@ def test_era5_gridded_extractor_synthetic(tmp_path):
   poly = shapely.geometry.box(-86.8, 40.2, -86.2, 40.8)
   metrics = extractor.extract_climate_metrics_for_polygon(poly, baseline_years=None)
 
-  assert metrics["p_mean"] == 4.0
-  assert metrics["pet_mean_FAO_PM"] == 2.0
-  assert metrics["aridity_FAO_PM"] == 0.5
+  assert np.isclose(metrics["p_mean"], 4.0)
+  assert np.isclose(metrics["pet_mean"], 2.0)
+  assert np.isclose(metrics["pet_mean_FAO_PM"], 2.0)
+  assert np.isclose(metrics["aridity"], 0.5)
+  assert np.isclose(metrics["aridity_FAO_PM"], 0.5)
+  assert np.isnan(metrics["pet_mean_ERA5_LAND"])
+  assert np.isnan(metrics["aridity_ERA5_LAND"])
+  assert np.isnan(metrics["moisture_index_ERA5_LAND"])
+  assert np.isnan(metrics["seasonality_ERA5_LAND"])
   assert metrics["frac_snow"] == 0.0
 
 

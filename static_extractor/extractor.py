@@ -285,8 +285,8 @@ class StaticAttributesExtractor:
       catchment_id: Identifier used for logging only.
 
     Returns:
-      The four *_ERA5_LAND attributes, or an empty dict if the gridded store
-      could not be read, in which case the caller's existing values stand.
+      The four *_ERA5_LAND attributes, or NaNs if the gridded store could not
+      be read.
     """
     keys = (
         "pet_mean_ERA5_LAND",
@@ -301,12 +301,12 @@ class StaticAttributesExtractor:
     except Exception as e:  # pylint: disable=broad-except
       logger.warning(
           "Could not compute ERA5-Land climate variants for catchment '%s' "
-          "from the gridded archive: %s",
+          "from the gridded archive: %s; leaving *_ERA5_LAND attributes as NaN.",
           catchment_id,
           e,
       )
-      return {}
-    return {k: gridded[k] for k in keys if k in gridded}
+      return {k: np.nan for k in keys}
+    return {k: gridded.get(k, np.nan) for k in keys}
 
   def _read_subbasins_in_bbox(
       self, bbox: Tuple[float, float, float, float]
@@ -545,10 +545,10 @@ class StaticAttributesExtractor:
       pet_era5_col = next((c for c in ["potential_evaporation", "pet_era5", "pev"] if c in timeseries_df.columns), None)
       pet_fao_col = next((c for c in ["pet_fao", "pet_mean_FAO_PM", "fao_pet"] if c in timeseries_df.columns), None)
 
-      if p_col and t_col and pet_era5_col:
+      if p_col and t_col:
         p_series = timeseries_df[p_col]
         t_series = timeseries_df[t_col]
-        pet_era5_series = timeseries_df[pet_era5_col]
+        pet_era5_series = timeseries_df[pet_era5_col] if pet_era5_col else None
         pet_fao_series = timeseries_df[pet_fao_col] if pet_fao_col else None
         era5_indices = compute_caravan_climate_metrics(
             precipitation=p_series,
@@ -564,13 +564,32 @@ class StaticAttributesExtractor:
         )
       except Exception as e:
         logger.warning(
-            "Gridded ERA5 extraction failed for catchment '%s': %s. Falling back to HYBAS statistics.",
+            "Gridded ERA5 extraction failed for catchment '%s': %s; "
+            "leaving climate attributes as NaN.",
             catchment_id,
             e,
         )
-        era5_indices = {}
-
-    if not era5_indices or all(pd.isna(v) for v in era5_indices.values()):
+        era5_indices = {
+            "p_mean": np.nan,
+            "pet_mean": np.nan,
+            "pet_mean_FAO_PM": np.nan,
+            "pet_mean_ERA5_LAND": np.nan,
+            "aridity": np.nan,
+            "aridity_FAO_PM": np.nan,
+            "aridity_ERA5_LAND": np.nan,
+            "frac_snow": np.nan,
+            "moisture_index": np.nan,
+            "moisture_index_FAO_PM": np.nan,
+            "moisture_index_ERA5_LAND": np.nan,
+            "seasonality": np.nan,
+            "seasonality_FAO_PM": np.nan,
+            "seasonality_ERA5_LAND": np.nan,
+            "high_prec_freq": np.nan,
+            "high_prec_dur": np.nan,
+            "low_prec_freq": np.nan,
+            "low_prec_dur": np.nan,
+        }
+    else:
       # Load from Level 12 precomputed continental climate indices table
       hybas_ids = [int(hid) for hid in gdf_matched["HYBAS_ID"].values]
       intersect_weights = [

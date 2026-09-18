@@ -181,7 +181,7 @@ def _split_list(indices: np.ndarray) -> List[List[int]]:
 def compute_caravan_climate_metrics(
     precipitation: pd.Series,
     temperature: pd.Series,
-    pet_era5: pd.Series,
+    pet_era5: Optional[pd.Series] = None,
     pet_fao: Optional[pd.Series] = None,
 ) -> Dict[str, float]:
   """Computes the Caravan climate indices.
@@ -191,7 +191,7 @@ def compute_caravan_climate_metrics(
   Args:
     precipitation: Daily basin-mean precipitation series (mm/day).
     temperature: Daily basin-mean 2m air temperature series (°C).
-    pet_era5: Daily basin-mean ERA5-Land native potential evaporation (mm/day).
+    pet_era5: Optional daily basin-mean ERA5-Land native potential evaporation (mm/day).
     pet_fao: Optional daily basin-mean FAO-56 Penman-Monteith PET (mm/day).
 
   Returns:
@@ -201,16 +201,26 @@ def compute_caravan_climate_metrics(
   p_mean = float(np.nanmean(p)) if len(p) > 0 else np.nan
 
   # 1. ERA5-Land Native PEV Metrics
-  e_era5 = np.asarray(pet_era5.values, dtype=float)
-  pet_mean_era5 = float(np.nanmean(e_era5)) if len(e_era5) > 0 else np.nan
-  aridity_era5 = (
-      float(pet_mean_era5 / p_mean)
-      if (p_mean and not np.isnan(p_mean) and p_mean > 0)
-      else np.nan
-  )
-  mi_era5, seas_era5 = calculate_knoben_moisture_and_seasonality(
-      precipitation, pet_era5
-  )
+  if pet_era5 is not None:
+    e_era5 = np.asarray(pet_era5.values, dtype=float)
+    pet_mean_era5 = float(np.nanmean(e_era5)) if len(e_era5) > 0 else np.nan
+    aridity_era5 = (
+        float(pet_mean_era5 / p_mean)
+        if (p_mean and not np.isnan(p_mean) and p_mean > 0)
+        else np.nan
+    )
+    mi_era5, seas_era5 = calculate_knoben_moisture_and_seasonality(
+        precipitation, pet_era5
+    )
+  else:
+    logger.warning(
+        "ERA5-Land potential evaporation series is missing; "
+        "setting *_ERA5_LAND climate attributes to NaN."
+    )
+    pet_mean_era5 = np.nan
+    aridity_era5 = np.nan
+    mi_era5 = np.nan
+    seas_era5 = np.nan
 
   # 2. FAO-56 Penman-Monteith Metrics
   if pet_fao is not None:
@@ -225,10 +235,14 @@ def compute_caravan_climate_metrics(
         precipitation, pet_fao
     )
   else:
-    pet_mean_fao = pet_mean_era5
-    aridity_fao = aridity_era5
-    mi_fao = mi_era5
-    seas_fao = seas_era5
+    logger.warning(
+        "FAO-56 Penman-Monteith PET series is missing; "
+        "setting unsuffixed and *_FAO_PM climate attributes to NaN."
+    )
+    pet_mean_fao = np.nan
+    aridity_fao = np.nan
+    mi_fao = np.nan
+    seas_fao = np.nan
 
   # 3. Fraction of Snow (Knoben et al. 2018, Eq. 4)
   mean_monthly_precip = precipitation.groupby(precipitation.index.month).mean()
@@ -467,17 +481,17 @@ class ERA5ClimateLoader:
         "p_mean": raw_res["p_mean"],
         "pet_mean": raw_res["pet_mean"],
         "pet_mean_FAO_PM": raw_res["pet_mean"],
-        "pet_mean_ERA5_LAND": raw_res["pet_mean"],
+        "pet_mean_ERA5_LAND": np.nan,
         "aridity": raw_res["aridity"],
         "aridity_FAO_PM": raw_res["aridity"],
-        "aridity_ERA5_LAND": raw_res["aridity"],
+        "aridity_ERA5_LAND": np.nan,
         "frac_snow": raw_res["frac_snow"],
         "moisture_index": raw_res["moisture_index"],
         "moisture_index_FAO_PM": raw_res["moisture_index"],
-        "moisture_index_ERA5_LAND": raw_res["moisture_index"],
+        "moisture_index_ERA5_LAND": np.nan,
         "seasonality": raw_res["seasonality"],
         "seasonality_FAO_PM": raw_res["seasonality"],
-        "seasonality_ERA5_LAND": raw_res["seasonality"],
+        "seasonality_ERA5_LAND": np.nan,
         "high_prec_freq": raw_res["high_prec_freq"],
         "high_prec_dur": raw_res["high_prec_dur"],
         "low_prec_freq": raw_res["low_prec_freq"],
@@ -720,17 +734,26 @@ class ERA5GriddedExtractor:
           "low_prec_dur": np.nan,
       }
 
-    # Area-weighted spatial mean
+    # Area-weighted spatial mean (renormalizing weights over non-NaN cells)
     w_matrix = weights.reshape(1, -1)
-    p_series = np.nansum(p_cells * w_matrix, axis=1)
-    t_series = np.nansum(t_cells * w_matrix, axis=1)
+
+    def _weighted_nanmean(cells: np.ndarray) -> np.ndarray:
+      valid_w = np.where(np.isnan(cells), 0.0, w_matrix)
+      w_sum = np.sum(valid_w, axis=1)
+      num = np.nansum(cells * w_matrix, axis=1)
+      return np.where(w_sum > 0, num / w_sum, np.nan)
+
+    p_series = _weighted_nanmean(p_cells)
+    t_series = _weighted_nanmean(t_cells)
 
     def _pet_series(sub):
       """Area-weighted daily PET in mm/day, or None if the variable is absent."""
       if sub is None:
         return None
       cells = sub[:, rel_lat_idx, rel_lon_idx]
-      series = np.nansum(cells * w_matrix, axis=1)
+      if np.all(np.isnan(cells)):
+        return None
+      series = _weighted_nanmean(cells)
       # ERA5 stores evaporation as a negative flux; magnitudes below 0.5 imply
       # metres rather than mm.
       if np.nanmax(np.abs(series)) < 0.5:
@@ -740,15 +763,18 @@ class ERA5GriddedExtractor:
     pet_fao_series = _pet_series(pet_fao_sub)
     pet_era5_series = _pet_series(pet_era5_sub)
 
-    if pet_fao_series is None and pet_era5_series is None:
-      pet_era5_series = np.full_like(p_series, 2.0)
-    elif pet_era5_series is None:
+    if pet_fao_series is None:
       logger.warning(
-          "No native ERA5-Land potential evaporation variable found in %s; "
-          "the *_ERA5_LAND attributes will repeat the FAO-PM values.",
+          "No FAO-56 Penman-Monteith PET variable found in %s; "
+          "unsuffixed and *_FAO_PM PET attributes will be NaN.",
           self.zarr_uri,
       )
-      pet_era5_series = pet_fao_series
+    if pet_era5_series is None:
+      logger.warning(
+          "No native ERA5-Land potential evaporation variable found in %s; "
+          "*_ERA5_LAND PET attributes will be NaN.",
+          self.zarr_uri,
+      )
 
     # Unit conversions
     if np.nanmean(t_series) > 100.0:
@@ -773,7 +799,11 @@ class ERA5GriddedExtractor:
 
     p_s = pd.Series(p_series, index=date_index)
     t_s = pd.Series(t_series, index=date_index)
-    pet_era5_s = pd.Series(pet_era5_series, index=date_index)
+    pet_era5_s = (
+        pd.Series(pet_era5_series, index=date_index)
+        if pet_era5_series is not None
+        else None
+    )
     pet_fao_s = (
         pd.Series(pet_fao_series, index=date_index)
         if pet_fao_series is not None
@@ -786,7 +816,8 @@ class ERA5GriddedExtractor:
       if np.any(mask_dates):
         p_s = p_s.loc[mask_dates]
         t_s = t_s.loc[mask_dates]
-        pet_era5_s = pet_era5_s.loc[mask_dates]
+        if pet_era5_s is not None:
+          pet_era5_s = pet_era5_s.loc[mask_dates]
         if pet_fao_s is not None:
           pet_fao_s = pet_fao_s.loc[mask_dates]
 

@@ -587,7 +587,8 @@ def run_benchmark(
   print("=" * 80)
   print(f"Total Basins Evaluated      : {total_basins}")
   print(f"Total Wall-Clock Time        : {total_wall_time:.2f}s ({time_per_basin:.3f}s / basin)")
-  print(f"Successful Extractions       : {successful} / {total_basins} (100.0%)")
+  success_pct = (100.0 * successful / total_basins) if total_basins else 0.0
+  print(f"Successful Extractions       : {successful} / {total_basins} ({success_pct:.1f}%)")
   print(f"Total Attributes Checked     : {len(attr_metrics_df)} (196 HydroATLAS + 14 Caravan ERA5)")
   print(f"Continuous Attributes Mean r : {mean_r:.4f}")
   print(f"Continuous Attributes Med r  : {median_r:.5f}")
@@ -793,7 +794,7 @@ def _generate_markdown_report(
       "## 1. Executive Summary",
       "",
       f"- **Total Basins Evaluated**: {total_basins}",
-      f"- **Extraction Success Rate**: {successful} / {total_basins} (100.0%)",
+      f"- **Extraction Success Rate**: {successful} / {total_basins} ({(100.0 * successful / total_basins if total_basins else 0.0):.1f}%)",
       f"- **Total Benchmark Runtime**: {total_wall_time:.2f}s ({time_per_basin:.3f}s / basin)",
       f"- **Continuous Attributes Mean Pearson r**: **{mean_r:.4f}**",
       f"- **Continuous Attributes Median Pearson r**: **{median_r:.5f}**",
