@@ -67,6 +67,7 @@ jobs:
             "zarr>=3" \
             "netcdf4" \
             "h5netcdf" \
+            "h5py" \
             "fsspec" \
             "gcsfs" \
             "requests" \
