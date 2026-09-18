@@ -53,6 +53,10 @@ import pandas as pd
 import tqdm
 import xarray as xr
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+  sys.path.insert(0, _REPO_ROOT)
+
 from multimet.storage import NON_RETRYABLE_ERRORS, resolve_zarr_target
 
 DEFAULT_PROJECT = "global-ungauged-experiments"
