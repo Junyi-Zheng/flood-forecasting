@@ -699,9 +699,13 @@ class Multimet(Dataset):
         list[xr.Dataset]
             Datasets containing the loaded hindcast features.
         """
-        # Prepare hindcast features to load, including the masks of union_mapping
-        features = set(self._hindcast_features) | set(
-            (self._union_mapping or {}).values()
+        # Prepare hindcast features to load, including the masks of union_mapping.
+        # dict.fromkeys (rather than a set) dedups while preserving insertion
+        # order, so the resulting `data_vars` order is stable across processes.
+        features = list(
+            dict.fromkeys(
+                [*self._hindcast_features, *(self._union_mapping or {}).values()]
+            )
         )
 
         # Check if single unified dynamics zarr store contains the features
