@@ -118,15 +118,12 @@ def export_subdataset_partitioned_files(
         coords_file = candidate2
 
   if coords_file is not None and coords_file.exists():
-    try:
-      coords_df = pd.read_csv(coords_file)
-      if "gauge_id" in coords_df.columns:
-        coords_df = coords_df.set_index("gauge_id")
-      for col in ["gauge_lat", "gauge_lon"]:
-        if col in coords_df.columns and col not in df_work.columns:
-          df_work[col] = df_work.index.map(coords_df[col])
-    except Exception as e:
-      logger.debug("Could not attach coordinates from %s: %s", coords_file, e)
+    coords_df = pd.read_csv(coords_file)
+    if "gauge_id" in coords_df.columns:
+      coords_df = coords_df.set_index("gauge_id")
+    for col in ["gauge_lat", "gauge_lon"]:
+      if col in coords_df.columns and col not in df_work.columns:
+        df_work[col] = df_work.index.map(coords_df[col])
 
   # 2. Partition columns
   caravan_cols = [
@@ -159,10 +156,7 @@ def export_subdataset_partitioned_files(
     if cand_other.exists():
       shutil.copy(cand_other, other_path)
   if other_path.exists():
-    try:
-      df_other = pd.read_csv(other_path, index_col=0)
-    except Exception as e:
-      logger.debug("Could not read existing %s: %s", other_path, e)
+    df_other = pd.read_csv(other_path, index_col=0)
 
   # 4. Construct unified table and save to Parquet
   df_unified = df_hydro.join(df_caravan, how="outer")
@@ -633,31 +627,27 @@ def run_batch_extraction(
       parquet_file = sub_dir / f"attributes_{ds_name}.parquet"
       hydro_file = sub_dir / f"attributes_hydroatlas_{ds_name}.csv"
       caravan_file = sub_dir / f"attributes_caravan_{ds_name}.csv"
-      if resume and (
-          (parquet_file.exists() and parquet_file.stat().st_size > 500)
-          or (hydro_file.exists() and caravan_file.exists() and hydro_file.stat().st_size > 500)
-      ):
-        try:
-          if parquet_file.exists():
-            df = pd.read_parquet(parquet_file)
-          else:
-            df = pd.read_csv(hydro_file, index_col=0).join(
-                pd.read_csv(caravan_file, index_col=0), how="outer"
-            )
+      if resume and (parquet_file.exists() or (hydro_file.exists() and caravan_file.exists())):
+        if parquet_file.exists():
+          df = pd.read_parquet(parquet_file)
+        else:
+          df = pd.read_csv(hydro_file, index_col=0).join(
+              pd.read_csv(caravan_file, index_col=0), how="outer"
+          )
+        if not df.empty:
           extracted_dfs[ds_name] = df
           dataset_pbar.set_postfix_str(f"Skipped {ds_name} (already done)")
           dataset_pbar.update(1)
           continue
-        except Exception:
-          pass
     else:
       out_file = out_dir / f"attributes_caravan_{ds_name}.csv"
-      if resume and out_file.exists() and out_file.stat().st_size > 500:
+      if resume and out_file.exists():
         df = pd.read_csv(out_file, index_col=0)
-        extracted_dfs[ds_name] = df
-        dataset_pbar.set_postfix_str(f"Skipped {ds_name} (already done)")
-        dataset_pbar.update(1)
-        continue
+        if not df.empty:
+          extracted_dfs[ds_name] = df
+          dataset_pbar.set_postfix_str(f"Skipped {ds_name} (already done)")
+          dataset_pbar.update(1)
+          continue
 
     dataset_pbar.set_postfix_str(f"Extracting {ds_name}...")
     t0 = time.time()
@@ -704,8 +694,6 @@ def run_batch_extraction(
         )
 
       dataset_pbar.set_postfix_str(f"Done {ds_name} ({len(df):,} basins, {elapsed:.1f}s)")
-    except Exception as e:
-      logger.exception("Error extracting attributes for dataset '%s': %s", ds_name, e)
     finally:
       dataset_pbar.update(1)
 

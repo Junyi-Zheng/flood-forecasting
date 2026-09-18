@@ -128,7 +128,12 @@ def test_pour_point_properties():
   res = compute_pour_point_properties(
       basin_data, pour_point_properties=["dis_m3_pyr"]
   )
-  assert "dis_m3_pyr" in res
+  assert res["dis_m3_pyr"] == 50.0
+
+  empty_res = compute_pour_point_properties(
+      {"weights": [], "SUB_AREA": []}, pour_point_properties=["dis_m3_pyr"]
+  )
+  assert np.isnan(empty_res["dis_m3_pyr"])
 
 
 def _build_synthetic_hydroatlas_env(tmp_path: Path, include_native_pet: bool = True):
@@ -305,6 +310,21 @@ def test_extract_attributes_for_polygon_end_to_end(tmp_path):
   assert np.isnan(ts_attrs["pet_mean_ERA5_LAND"])
   assert np.isnan(ts_attrs["aridity_ERA5_LAND"])
 
+  # Non-intersecting polygon returns NaN (never substitutes nearest sub-basin)
+  non_inter_poly = shapely.geometry.box(-89.0, 40.1, -88.5, 40.5)
+  res_no_inter = extractor.extract_attributes_for_polygon(non_inter_poly, catchment_id="offshore")
+  assert res_no_inter["intersected_subbasins_count"] == 0
+  assert res_no_inter["caravan_attributes"]["area_fraction_used_for_aggregation"] == 0.0
+  assert np.isnan(res_no_inter["caravan_attributes"]["ele_mt_sav"])
+  assert np.isnan(res_no_inter["caravan_attributes"]["dis_m3_pyr"])
+
+  # High min_overlap_threshold filtering all slivers returns NaN (never falls back to iloc[0])
+  res_filtered = extractor.extract_attributes_for_polygon(
+      query_poly, catchment_id="filtered", min_overlap_threshold=1e6
+  )
+  assert res_filtered["caravan_attributes"]["area_fraction_used_for_aggregation"] == 0.0
+  assert np.isnan(res_filtered["caravan_attributes"]["ele_mt_sav"])
+
 
 def test_extract_attributes_batch_and_file_io(tmp_path):
   """Tests extract_attributes_batch and extract_attributes_from_file with GeoJSON and Parquet inputs."""
@@ -457,6 +477,32 @@ def test_era5_gridded_extractor_synthetic(tmp_path):
   assert np.isnan(metrics["moisture_index_ERA5_LAND"])
   assert np.isnan(metrics["seasonality_ERA5_LAND"])
   assert metrics["frac_snow"] == 0.0
+
+  # Out-of-bounds polygon returns NaN instead of snapping to nearest edge cell
+  offshore_poly = shapely.geometry.box(-120.0, 10.0, -119.5, 10.5)
+  offshore_metrics = extractor.extract_climate_metrics_for_polygon(offshore_poly, baseline_years=None)
+  assert np.isnan(offshore_metrics["p_mean"])
+  assert np.isnan(offshore_metrics["pet_mean_FAO_PM"])
+
+  # Explicit unit conversion (meters -> mm, Kelvin -> Celsius, hours since epoch)
+  zarr_units_dir = tmp_path / "synthetic_era5_units.zarr"
+  root_u = zarr.open_group(str(zarr_units_dir), mode="w")
+  root_u.create_array("latitude", data=lats)
+  root_u.create_array("longitude", data=lons)
+  t_arr = root_u.create_array("time", data=np.arange(n_times, dtype=np.int64) * 24)
+  t_arr.attrs["units"] = "hours since 2000-01-01 00:00:00"
+  p_arr = root_u.create_array("era5land_total_precipitation", data=np.full((n_times, len(lats), len(lons)), 0.004, dtype=np.float32))
+  p_arr.attrs["units"] = "m"
+  temp_arr = root_u.create_array("era5land_temperature_2m", data=np.full((n_times, len(lats), len(lons)), 288.15, dtype=np.float32))
+  temp_arr.attrs["units"] = "K"
+  pet_arr = root_u.create_array("era5land_potential_evaporation_FAO_PENMAN_MONTEITH", data=np.full((n_times, len(lats), len(lons)), -0.002, dtype=np.float32))
+  pet_arr.attrs["units"] = "m"
+
+  ext_u = ERA5GriddedExtractor(zarr_uri=str(zarr_units_dir))
+  m_u = ext_u.extract_climate_metrics_for_polygon(poly, baseline_years=None)
+  assert np.isclose(m_u["p_mean"], 4.0)
+  assert np.isclose(m_u["pet_mean_FAO_PM"], 2.0)
+  assert m_u["frac_snow"] == 0.0
 
 
 def test_batch_runner_discovery(tmp_path):

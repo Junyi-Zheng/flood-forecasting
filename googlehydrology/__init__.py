@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-try:
-  from static_extractor import (
-      StaticAttributesExtractor,
-      ERA5ClimateLoader,
-      compute_caravan_climate_metrics,
-  )
-except ImportError:
-  pass
+_STATIC_EXTRACTOR_EXPORTS = {
+    "StaticAttributesExtractor",
+    "ERA5ClimateLoader",
+    "compute_caravan_climate_metrics",
+}
+
+
+def __getattr__(name: str):
+  if name in _STATIC_EXTRACTOR_EXPORTS:
+    import static_extractor
+
+    return getattr(static_extractor, name)
+  raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -30,9 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("build_benchmark_dataset")
 
-DEFAULT_CARAVAN_DIR = Path(
-    "/usr/local/google/home/gsnearing/Projects/caravan_data/Caravan-nc"
-)
+import os
 DEFAULT_OUTPUT_PATH = (
     Path(__file__).resolve().parent.parent
     / "static_extractor"
@@ -201,7 +199,8 @@ def main():
   parser.add_argument(
       "--caravan-dir",
       type=str,
-      default=str(DEFAULT_CARAVAN_DIR),
+      default=os.environ.get("CARAVAN_DIR"),
+      required="CARAVAN_DIR" not in os.environ,
       help="Path to Caravan root directory containing attributes/ and shapefiles/.",
   )
   parser.add_argument(

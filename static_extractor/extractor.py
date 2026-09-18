@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyproj
 import shapely.geometry
 from tqdm.auto import tqdm
 shape = shapely.geometry.shape
@@ -42,6 +43,7 @@ Point = shapely.geometry.Point
 Polygon = shapely.geometry.Polygon
 MultiPolygon = shapely.geometry.MultiPolygon
 box = shapely.geometry.box
+_WGS84_GEOD = pyproj.Geod(ellps="WGS84")
 
 try:
   import pyogrio
@@ -127,11 +129,11 @@ def compute_pour_point_properties(
   weights = np.array(basin_data.get("weights", []))
   sub_areas = np.array(basin_data.get("SUB_AREA", []))
   if len(weights) == 0 or len(sub_areas) == 0:
-    return {p: 0.0 for p in props_to_compute}
+    return {p: np.nan for p in props_to_compute}
 
   percentage_overlap = np.where(sub_areas > 0, weights / sub_areas, 0.0)
   if len(percentage_overlap) == 0:
-    return {p: 0.0 for p in props_to_compute}
+    return {p: np.nan for p in props_to_compute}
 
   current_basin_pos = int(np.argmax(percentage_overlap))
   next_down_id = basin_data["NEXT_DOWN"][current_basin_pos]
@@ -166,7 +168,7 @@ def compute_pour_point_properties(
           sum(basin_data[prop][i] for i in direct_upstream_polygons)
       )
     else:
-      aggregated[prop] = 0.0
+      aggregated[prop] = np.nan
   return aggregated
 
 
@@ -225,24 +227,16 @@ class StaticAttributesExtractor:
     self.layer_name = None if self.is_shapefile else "BasinATLAS_v10_lev12"
 
     if self.gdb_path.exists():
-      try:
-        if pyogrio is not None:
-          if self.is_shapefile:
-            info = pyogrio.read_info(self.gdb_path)
-          else:
-            info = pyogrio.read_info(self.gdb_path, layer=self.layer_name)
-          self.all_gdb_fields = list(info["fields"])
+      if pyogrio is not None:
+        if self.is_shapefile:
+          info = pyogrio.read_info(self.gdb_path)
         else:
-          kwargs = {} if self.is_shapefile else {"layer": self.layer_name}
-          sample_df = gpd.read_file(self.gdb_path, rows=1, **kwargs)
-          self.all_gdb_fields = list(sample_df.columns)
-      except Exception as e:
-        logger.warning(
-            "Could not read fields from %s (%s). Initializing with schema definitions.",
-            self.gdb_path,
-            e,
-        )
-        self.all_gdb_fields = list(ATTRIBUTE_DEFINITIONS.keys())
+          info = pyogrio.read_info(self.gdb_path, layer=self.layer_name)
+        self.all_gdb_fields = list(info["fields"])
+      else:
+        kwargs = {} if self.is_shapefile else {"layer": self.layer_name}
+        sample_df = gpd.read_file(self.gdb_path, rows=1, **kwargs)
+        self.all_gdb_fields = list(sample_df.columns)
     else:
       logger.warning(
           "BasinATLAS dataset not found at %s. Initialized with schema definitions.",
@@ -398,107 +392,82 @@ class StaticAttributesExtractor:
 
     # 2. Read BasinATLAS Level 12 Sub-basins within Bounding Box
     bbox = (minx - 0.02, miny - 0.02, maxx + 0.02, maxy + 0.02)
-    try:
-      gdf_subbasins = self._read_subbasins_in_bbox(bbox)
-    except Exception as e:
-      logger.warning("Error querying bounding box %s: %s", bbox, e)
-      gdf_subbasins = gpd.GeoDataFrame()
+    gdf_subbasins = self._read_subbasins_in_bbox(bbox)
 
-    if len(gdf_subbasins) == 0:
-      logger.debug("No sub-basins found in immediate bbox %s. Trying broader bbox.", bbox)
-      bbox_wide = (minx - 0.1, miny - 0.1, maxx + 0.1, maxy + 0.1)
-      try:
-        gdf_subbasins = self._read_subbasins_in_bbox(bbox_wide)
-      except Exception:
-        gdf_subbasins = gpd.GeoDataFrame()
-
-    if len(gdf_subbasins) == 0:
-      raise ValueError(
-          f"No BasinATLAS Level 12 units found intersecting polygon bounds {bbox}. "
-          "Ensure the polygon coordinates are in EPSG:4326 (latitude/longitude)."
-      )
-
-    # 3. Calculate exact geometric intersections and area weights in km²
-    intersections = gdf_subbasins.geometry.intersection(geom)
-    valid_mask = ~intersections.is_empty
-    gdf_matched = gdf_subbasins[valid_mask].copy()
-    gdf_matched["intersect_geom"] = intersections[valid_mask]
-
-    if len(gdf_matched) == 0:
-      centroid = geom.centroid
-      distances = gdf_subbasins.geometry.distance(centroid)
-      nearest_idx = distances.idxmin()
-      gdf_matched = gdf_subbasins.loc[[nearest_idx]].copy()
-      gdf_matched["intersect_geom"] = [geom]
-
-    # Geodesic area scaling using latitude projection
-    mean_lat = geom.centroid.y
-    deg_to_km = 111.32
-    lat_scale = deg_to_km
-    lon_scale = deg_to_km * np.cos(np.radians(mean_lat))
-
-    gdf_matched["intersect_area_km2"] = [
-        float(g.area * lat_scale * lon_scale)
-        for g in gdf_matched["intersect_geom"]
-    ]
+    # 3. Calculate exact geometric intersections and WGS84 geodesic area weights in km²
+    if len(gdf_subbasins) > 0:
+      intersections = gdf_subbasins.geometry.intersection(geom)
+      valid_mask = ~intersections.is_empty
+      gdf_matched = gdf_subbasins[valid_mask].copy()
+      gdf_matched["intersect_geom"] = intersections[valid_mask]
+      gdf_matched["intersect_area_km2"] = [
+          float(abs(_WGS84_GEOD.geometry_area_perimeter(g)[0]) / 1e6)
+          for g in gdf_matched["intersect_geom"]
+      ]
+    else:
+      gdf_matched = gpd.GeoDataFrame()
 
     # 4. Collect Sub-basin Data with Caravan Overlap Rules
     basin_data = defaultdict(list)
-    for _, row in gdf_matched.iterrows():
-      int_area = float(row["intersect_area_km2"])
-      sub_area = (
-          float(row["SUB_AREA"])
-          if ("SUB_AREA" in row and row["SUB_AREA"] > 0)
-          else int_area
+    if len(gdf_matched) == 0:
+      logger.warning(
+          "No BasinATLAS Level 12 units intersect catchment '%s' (bounds=%s); "
+          "setting HydroATLAS attributes to NaN.",
+          catchment_id,
+          bbox,
       )
+    else:
+      for _, row in gdf_matched.iterrows():
+        int_area = float(row["intersect_area_km2"])
+        sub_area = (
+            float(row["SUB_AREA"])
+            if ("SUB_AREA" in row and row["SUB_AREA"] > 0)
+            else int_area
+        )
 
-      # Caravan filtering threshold: either > min_overlap_threshold or >50% of sub-basin
-      if (int_area > min_overlap_threshold) or (int_area / sub_area > 0.5):
-        for prop in self.use_properties:
-          if prop in row:
-            basin_data[prop].append(row[prop])
-        basin_data["weights"].append(int_area)
+        # Caravan filtering threshold: either > min_overlap_threshold or >50% of sub-basin
+        if (int_area > min_overlap_threshold) or (int_area / sub_area > 0.5):
+          for prop in self.use_properties:
+            if prop in row:
+              basin_data[prop].append(row[prop])
+          basin_data["weights"].append(int_area)
 
-      basin_data["area_fragments"].append(int_area)
+        basin_data["area_fragments"].append(int_area)
 
-    # Fallback if all sub-basins were filtered out
-    if not basin_data["weights"]:
-      for prop in self.use_properties:
-        if prop in gdf_matched.columns:
-          basin_data[prop].append(gdf_matched.iloc[0][prop])
-      basin_data["weights"].append(
-          float(gdf_matched.iloc[0]["intersect_area_km2"])
-      )
+      if not basin_data["weights"]:
+        logger.warning(
+            "All intersecting sub-basins for catchment '%s' fell below "
+            "min_overlap_threshold=%.3f km²; setting HydroATLAS attributes to NaN.",
+            catchment_id,
+            min_overlap_threshold,
+        )
 
-    weights = np.array(basin_data["weights"])
-    mask = weights > 0
+    weights = np.array(basin_data["weights"], dtype=float)
+    mask = weights > min_overlap_threshold
     masked_weights = weights[mask]
 
     # 5. Aggregate Caravan Properties
     caravan_attributes: Dict[str, Any] = {}
+    skip_props = {
+        "weights",
+        "UP_AREA",
+        "area_fragments",
+        "HYBAS_ID",
+        "NEXT_DOWN",
+        "SUB_AREA",
+        "geometry",
+        "geom",
+        "Shape",
+    }
 
     for key in self.use_properties:
-      if key in [
-          "weights",
-          "UP_AREA",
-          "area_fragments",
-          "HYBAS_ID",
-          "NEXT_DOWN",
-          "SUB_AREA",
-          "geometry",
-          "geom",
-          "Shape",
-      ]:
+      if key in skip_props or key in POUR_POINT_PROPERTIES:
         continue
-      if key in POUR_POINT_PROPERTIES:
-        continue
-      if key not in basin_data:
+      if key not in basin_data or len(masked_weights) == 0:
+        caravan_attributes[key] = np.nan
         continue
 
-      try:
-        val = np.array(basin_data[key], dtype=float)
-      except (ValueError, TypeError):
-        continue
+      val = np.array(basin_data[key], dtype=float)
       masked_val = val[mask]
 
       # Caravan rule for wetland classes: no wetland (-999 / -9999 / <0) is mapped to class 13
@@ -594,10 +563,16 @@ class StaticAttributesExtractor:
         }
     else:
       # Load from Level 12 precomputed continental climate indices table
-      hybas_ids = [int(hid) for hid in gdf_matched["HYBAS_ID"].values]
-      intersect_weights = [
-          float(w) for w in gdf_matched["intersect_area_km2"].values
-      ]
+      hybas_ids = (
+          [int(hid) for hid in gdf_matched["HYBAS_ID"].values]
+          if len(gdf_matched) > 0
+          else []
+      )
+      intersect_weights = (
+          [float(w) for w in gdf_matched["intersect_area_km2"].values]
+          if len(gdf_matched) > 0
+          else []
+      )
       era5_indices = self.era5_loader.get_indices_for_subbasins(
           hybas_ids, intersect_weights
       )
@@ -613,13 +588,17 @@ class StaticAttributesExtractor:
       caravan_attributes[k] = v
 
     # 7. Drainage Area & Aggregation Fraction
-    total_frag_area = float(sum(basin_data["area_fragments"]))
+    total_frag_area = (
+        float(sum(basin_data["area_fragments"]))
+        if basin_data["area_fragments"]
+        else float(abs(_WGS84_GEOD.geometry_area_perimeter(geom)[0]) / 1e6)
+    )
     caravan_attributes["area"] = total_frag_area
     caravan_attributes["basin_area"] = total_frag_area  # Caravan attribute name
     caravan_attributes["area_fraction_used_for_aggregation"] = (
         float(sum(masked_weights) / total_frag_area)
-        if total_frag_area > 0
-        else 1.0
+        if total_frag_area > 0 and len(masked_weights) > 0
+        else 0.0
     )
 
     # 8. Curated UI Schema Formatting
@@ -637,7 +616,7 @@ class StaticAttributesExtractor:
       if attr_key in caravan_attributes:
         raw_val = caravan_attributes[attr_key]
         if pd.isna(raw_val):
-          scaled_val = 0.0
+          scaled_val = np.nan
         else:
           scaled_val = round(float(raw_val) * defn["scale"], 3)
           if defn["unit"] in ["m", "mm/yr", "people", "M m³"]:
@@ -663,36 +642,40 @@ class StaticAttributesExtractor:
     # 9. Summary Metrics
     summary = {
         "catchment_id": catchment_id,
-        "elevation_mean_m": processed_attributes.get("ele_mt_sav", 0.0),
-        "slope_mean_deg": processed_attributes.get("slp_dg_sav", 0.0),
-        "annual_precip_mm": processed_attributes.get("pre_mm_syr", 0.0),
-        "annual_temp_c": processed_attributes.get("tmp_dc_syr", 0.0),
-        "aridity_index": processed_attributes.get("ari_ix_sav", 0.0),
-        "era5_p_mean_mm_day": processed_attributes.get("p_mean", 0.0),
+        "elevation_mean_m": processed_attributes.get("ele_mt_sav", np.nan),
+        "slope_mean_deg": processed_attributes.get("slp_dg_sav", np.nan),
+        "annual_precip_mm": processed_attributes.get("pre_mm_syr", np.nan),
+        "annual_temp_c": processed_attributes.get("tmp_dc_syr", np.nan),
+        "aridity_index": processed_attributes.get("ari_ix_sav", np.nan),
+        "era5_p_mean_mm_day": processed_attributes.get("p_mean", np.nan),
         "era5_pet_mean_mm_day": processed_attributes.get(
-            "pet_mean_ERA5_LAND", 0.0
+            "pet_mean_ERA5_LAND", np.nan
         ),
         "era5_fao_pet_mean_mm_day": processed_attributes.get(
-            "pet_mean_FAO_PM", 0.0
+            "pet_mean_FAO_PM", np.nan
         ),
-        "era5_aridity": processed_attributes.get("aridity_ERA5_LAND", 0.0),
-        "era5_fao_aridity": processed_attributes.get("aridity_FAO_PM", 0.0),
-        "era5_frac_snow_pc": processed_attributes.get("frac_snow", 0.0),
-        "forest_fraction_pc": processed_attributes.get("for_pc_sse", 0.0),
-        "cropland_fraction_pc": processed_attributes.get("crp_pc_sse", 0.0),
-        "urban_fraction_pc": processed_attributes.get("urb_pc_sse", 0.0),
-        "dominant_land_cover_class": caravan_attributes.get("glc_cl_smj", 0),
-        "soil_clay_pc": processed_attributes.get("cly_pc_sav", 0.0),
-        "soil_sand_pc": processed_attributes.get("snd_pc_sav", 0.0),
-        "soil_silt_pc": processed_attributes.get("slt_pc_sav", 0.0),
+        "era5_aridity": processed_attributes.get("aridity_ERA5_LAND", np.nan),
+        "era5_fao_aridity": processed_attributes.get("aridity_FAO_PM", np.nan),
+        "era5_frac_snow_pc": processed_attributes.get("frac_snow", np.nan),
+        "forest_fraction_pc": processed_attributes.get("for_pc_sse", np.nan),
+        "cropland_fraction_pc": processed_attributes.get("crp_pc_sse", np.nan),
+        "urban_fraction_pc": processed_attributes.get("urb_pc_sse", np.nan),
+        "dominant_land_cover_class": caravan_attributes.get("glc_cl_smj", np.nan),
+        "soil_clay_pc": processed_attributes.get("cly_pc_sav", np.nan),
+        "soil_sand_pc": processed_attributes.get("snd_pc_sav", np.nan),
+        "soil_silt_pc": processed_attributes.get("slt_pc_sav", np.nan),
         "groundwater_table_depth_cm": processed_attributes.get(
-            "gwt_cm_sav", 0.0
+            "gwt_cm_sav", np.nan
         ),
-        "soil_water_content_pc": processed_attributes.get("swc_pc_syr", 0.0),
-        "inundation_max_pc": processed_attributes.get("inu_pc_smx", 0.0),
+        "soil_water_content_pc": processed_attributes.get("swc_pc_syr", np.nan),
+        "inundation_max_pc": processed_attributes.get("inu_pc_smx", np.nan),
         "total_area_km2": round(total_frag_area, 2),
         "intersected_subbasins": len(gdf_matched),
-        "subbasin_ids": [int(hid) for hid in gdf_matched["HYBAS_ID"].values],
+        "subbasin_ids": (
+            [int(hid) for hid in gdf_matched["HYBAS_ID"].values]
+            if len(gdf_matched) > 0
+            else []
+        ),
     }
 
     return {
@@ -892,31 +875,28 @@ class StaticAttributesExtractor:
     if not master_path.exists():
       return
 
-    try:
-      ds = xr.open_zarr(str(master_path)).load()
-      if "basin" not in ds.dims:
-        return
+    ds = xr.open_zarr(str(master_path)).load()
+    if "basin" not in ds.dims:
+      return
 
-      basin_list = list(ds["basin"].values)
-      if basin_id not in basin_list:
-        return
+    basin_list = list(ds["basin"].values)
+    if basin_id not in basin_list:
+      return
 
-      basin_idx = basin_list.index(basin_id)
-      caravan_attrs = attributes_dict.get("caravan_attributes", {})
+    basin_idx = basin_list.index(basin_id)
+    caravan_attrs = attributes_dict.get("caravan_attributes", {})
 
-      for key, val in caravan_attrs.items():
-        if isinstance(val, (int, float, np.integer, np.floating)):
-          var_name = f"caravan_{key}"
-          if var_name not in ds:
-            arr = np.full((len(basin_list),), np.nan, dtype=np.float32)
-            arr[basin_idx] = float(val)
-            ds[var_name] = (["basin"], arr)
-          else:
-            ds[var_name].values[basin_idx] = float(val)
+    for key, val in caravan_attrs.items():
+      if isinstance(val, (int, float, np.integer, np.floating)):
+        var_name = f"caravan_{key}"
+        if var_name not in ds:
+          arr = np.full((len(basin_list),), np.nan, dtype=np.float32)
+          arr[basin_idx] = float(val)
+          ds[var_name] = (["basin"], arr)
+        else:
+          ds[var_name].values[basin_idx] = float(val)
 
-      ds.to_zarr(str(master_path), mode="w", consolidated=True)
-      logger.info(
-          "Appended Caravan static attributes for %s to %s", basin_id, master_path
-      )
-    except Exception as e:
-      logger.warning("Could not append static attributes to Zarr store: %s", e)
+    ds.to_zarr(str(master_path), mode="w", consolidated=True)
+    logger.info(
+        "Appended Caravan static attributes for %s to %s", basin_id, master_path
+    )

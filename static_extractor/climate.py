@@ -245,15 +245,18 @@ def compute_caravan_climate_metrics(
     seas_fao = np.nan
 
   # 3. Fraction of Snow (Knoben et al. 2018, Eq. 4)
-  mean_monthly_precip = precipitation.groupby(precipitation.index.month).mean()
-  mean_monthly_temp = temperature.groupby(temperature.index.month).mean()
-  tot_monthly_p = mean_monthly_precip.sum()
-  if tot_monthly_p > 0:
-    frac_snow = float(
-        mean_monthly_precip.loc[mean_monthly_temp < 0.0].sum() / tot_monthly_p
-    )
+  if np.isnan(p_mean) or temperature.dropna().empty:
+    frac_snow = np.nan
   else:
-    frac_snow = 0.0
+    mean_monthly_precip = precipitation.groupby(precipitation.index.month).mean()
+    mean_monthly_temp = temperature.groupby(temperature.index.month).mean()
+    tot_monthly_p = mean_monthly_precip.sum()
+    if tot_monthly_p > 0:
+      frac_snow = float(
+          mean_monthly_precip.loc[mean_monthly_temp < 0.0].sum() / tot_monthly_p
+      )
+    else:
+      frac_snow = np.nan
 
   # 4. Extreme Precipitation Frequency & Duration (Addor et al. 2017)
   if p_mean and not np.isnan(p_mean) and p_mean > 0:
@@ -284,10 +287,10 @@ def compute_caravan_climate_metrics(
     else:
       low_prec_dur = 0.0
   else:
-    high_prec_freq = 0.0
-    high_prec_dur = 0.0
-    low_prec_freq = 0.0
-    low_prec_dur = 0.0
+    high_prec_freq = np.nan
+    high_prec_dur = np.nan
+    low_prec_freq = np.nan
+    low_prec_dur = np.nan
 
   return {
       "p_mean": round(p_mean, 4),
@@ -381,7 +384,15 @@ class ERA5ClimateLoader:
     if target_ids is None and continent_code in self.loaded_continents:
       return
 
-    if not self._ensure_file_on_disk(continent_code):
+    try:
+      self._ensure_file_on_disk(continent_code)
+    except FileNotFoundError as e:
+      logger.warning(
+          "Climate indices file for continent '%s' is unavailable (%s); "
+          "climate metrics for affected sub-basins will be NaN.",
+          continent_code,
+          e,
+      )
       return
 
     txt_path = self.cache_dir / f"{continent_code}_climate_indices.txt"
@@ -395,16 +406,13 @@ class ERA5ClimateLoader:
             continue
           if target_strs is not None and not any(ts in line for ts in target_strs):
             continue
-          try:
-            item = json.loads(line)
-            gid = item.get("gauge_id", "")
-            if gid.startswith("hybas_"):
-              hid = int(gid.split("_")[1])
-              if target_ids is None or hid in target_ids:
-                self.records[hid] = item
-                count += 1
-          except Exception:
-            pass
+          item = json.loads(line)
+          gid = item.get("gauge_id", "")
+          if gid.startswith("hybas_"):
+            hid = int(gid.split("_")[1])
+            if target_ids is None or hid in target_ids:
+              self.records[hid] = item
+              count += 1
       if target_ids is None:
         self.loaded_continents.add(continent_code)
       logger.debug(
@@ -417,12 +425,9 @@ class ERA5ClimateLoader:
     """Calculates area-weighted average ERA5 climate indices for a set of Level 12 sub-basins."""
     needed_continents = set()
     for hid in hybas_ids:
-      try:
-        first_digit = int(str(hid)[0])
-        if first_digit in CONTINENT_MAP:
-          needed_continents.add(CONTINENT_MAP[first_digit])
-      except Exception:
-        pass
+      first_digit = int(str(int(hid))[0])
+      if first_digit in CONTINENT_MAP:
+        needed_continents.add(CONTINENT_MAP[first_digit])
 
     for c in needed_continents:
       self.ensure_continent(c)
@@ -593,10 +598,11 @@ class ERA5GriddedExtractor:
             w_list.append(inter_area)
 
     if not w_list:
-      c = polygon.centroid
-      c_lat_idx = int(np.argmin(np.abs(self._lats - c.y)))
-      c_lon_idx = int(np.argmin(np.abs(self._lons - c.x)))
-      return np.array([c_lat_idx]), np.array([c_lon_idx]), np.array([1.0], dtype=np.float32)
+      return (
+          np.array([], dtype=int),
+          np.array([], dtype=int),
+          np.array([], dtype=np.float32),
+      )
 
     weights = np.array(w_list, dtype=np.float32)
     tot_w = np.sum(weights)
@@ -604,22 +610,110 @@ class ERA5GriddedExtractor:
       weights = weights / tot_w
     return np.array(lat_list, dtype=int), np.array(lon_list, dtype=int), weights
 
+  @staticmethod
+  def _depth_to_mm(series: np.ndarray, units: Optional[str], var_name: str) -> np.ndarray:
+    """Converts a precipitation or PET series to mm/day using declared array units."""
+    if units is None:
+      return series
+    u = units.strip().lower()
+    if u in {"m", "meter", "meters", "metre", "metres", "m of water equivalent", "m/day", "m d-1", "m d**-1"}:
+      return series * 1000.0
+    if u in {"mm", "mm/day", "mm d-1", "mm d**-1", "millimeter", "millimeters", "millimetre", "millimetres", "kg m-2", "kg m**-2", "kg/m2/day"}:
+      return series
+    raise ValueError(
+        f"Unsupported units {units!r} for climate variable {var_name!r}; expected mm or m."
+    )
+
+  @staticmethod
+  def _temp_to_celsius(series: np.ndarray, units: Optional[str], var_name: str) -> np.ndarray:
+    """Converts a temperature series to degrees Celsius using declared array units."""
+    if units is None:
+      return series
+    u = units.strip().lower()
+    if u in {"k", "kelvin", "kelvins", "degk", "degrees_kelvin"}:
+      return series - 273.15
+    if u in {"c", "degc", "°c", "celsius", "degrees_celsius", "degree_celsius"}:
+      return series
+    raise ValueError(
+        f"Unsupported temperature units {units!r} for variable {var_name!r}; expected K or degC."
+    )
+
+  @staticmethod
+  def _parse_time_coordinate(time_arr: np.ndarray, time_attrs: Dict[str, Any], zarr_uri: str) -> pd.DatetimeIndex:
+    """Parses CF-compliant time coordinates without guessing units or epochs."""
+    if np.issubdtype(time_arr.dtype, np.datetime64) or time_arr.dtype.kind in {"U", "S", "O"}:
+      return pd.DatetimeIndex(pd.to_datetime(time_arr))
+
+    units = time_attrs.get("units")
+    if not units or "since" not in str(units):
+      raise ValueError(
+          f"Time coordinate in {zarr_uri} lacks a valid CF '<unit> since <epoch>' attribute (got {units!r})."
+      )
+    unit_part, base_str = str(units).split("since", 1)
+    unit_token = unit_part.strip().lower().rstrip("s")
+    unit_map = {
+        "day": "D",
+        "d": "D",
+        "hour": "h",
+        "hr": "h",
+        "h": "h",
+        "minute": "m",
+        "min": "m",
+        "second": "s",
+        "sec": "s",
+        "s": "s",
+    }
+    if unit_token not in unit_map:
+      raise ValueError(
+          f"Unsupported time offset unit {unit_part.strip()!r} in {zarr_uri} (units={units!r})."
+      )
+    return pd.DatetimeIndex(
+        pd.to_datetime(base_str.strip()) + pd.to_timedelta(time_arr, unit=unit_map[unit_token])
+    )
+
   def extract_climate_metrics_for_polygon(
       self,
       polygon: Any,
       baseline_years: Optional[Tuple[int, int]] = (1981, 2020),
   ) -> Dict[str, float]:
-    """Extracts daily gridded series and calculates the 10 Caravan climate metrics.
+    """Extracts daily gridded series and calculates the Caravan climate metrics.
 
     Args:
       polygon: Polygon, MultiPolygon, or GeoJSON dict.
       baseline_years: Optional tuple of start and end years for climate baseline.
 
     Returns:
-      Dictionary of the 10 Caravan climate metrics.
+      Dictionary of Caravan climate metrics.
     """
+    nan_result = {
+        "p_mean": np.nan,
+        "pet_mean": np.nan,
+        "pet_mean_FAO_PM": np.nan,
+        "pet_mean_ERA5_LAND": np.nan,
+        "aridity": np.nan,
+        "aridity_FAO_PM": np.nan,
+        "aridity_ERA5_LAND": np.nan,
+        "frac_snow": np.nan,
+        "moisture_index": np.nan,
+        "moisture_index_FAO_PM": np.nan,
+        "moisture_index_ERA5_LAND": np.nan,
+        "seasonality": np.nan,
+        "seasonality_FAO_PM": np.nan,
+        "seasonality_ERA5_LAND": np.nan,
+        "high_prec_freq": np.nan,
+        "high_prec_dur": np.nan,
+        "low_prec_freq": np.nan,
+        "low_prec_dur": np.nan,
+    }
+
     ds = self._open_dataset()
     lat_idx, lon_idx, weights = self.compute_zonal_weights(polygon)
+    if len(weights) == 0:
+      logger.warning(
+          "Catchment polygon does not intersect gridded ERA5 coordinate domain at %s; returning NaN.",
+          self.zarr_uri,
+      )
+      return nan_result
 
     p_name = next(
         (
@@ -648,11 +742,6 @@ class ERA5GriddedExtractor:
         ),
         None,
     )
-    # Two distinct PET series. The FAO-56 Penman-Monteith variable feeds the
-    # unsuffixed and *_FAO_PM attributes; ERA5-Land's own potential evaporation
-    # feeds the *_ERA5_LAND attributes. Selecting only the first match here is
-    # what previously made the two families identical.
-
     pet_fao_name = next(
         (
             v
@@ -713,26 +802,7 @@ class ERA5GriddedExtractor:
           "Gridded ERA5 archive at %s returned all NaNs for this catchment bounds.",
           self.zarr_uri,
       )
-      return {
-          "p_mean": np.nan,
-          "pet_mean": np.nan,
-          "pet_mean_FAO_PM": np.nan,
-          "pet_mean_ERA5_LAND": np.nan,
-          "aridity": np.nan,
-          "aridity_FAO_PM": np.nan,
-          "aridity_ERA5_LAND": np.nan,
-          "frac_snow": np.nan,
-          "moisture_index": np.nan,
-          "moisture_index_FAO_PM": np.nan,
-          "moisture_index_ERA5_LAND": np.nan,
-          "seasonality": np.nan,
-          "seasonality_FAO_PM": np.nan,
-          "seasonality_ERA5_LAND": np.nan,
-          "high_prec_freq": np.nan,
-          "high_prec_dur": np.nan,
-          "low_prec_freq": np.nan,
-          "low_prec_dur": np.nan,
-      }
+      return nan_result
 
     # Area-weighted spatial mean (renormalizing weights over non-NaN cells)
     w_matrix = weights.reshape(1, -1)
@@ -743,25 +813,30 @@ class ERA5GriddedExtractor:
       num = np.nansum(cells * w_matrix, axis=1)
       return np.where(w_sum > 0, num / w_sum, np.nan)
 
-    p_series = _weighted_nanmean(p_cells)
-    t_series = _weighted_nanmean(t_cells)
+    p_series = self._depth_to_mm(
+        _weighted_nanmean(p_cells),
+        dict(ds[p_name].attrs).get("units"),
+        p_name,
+    )
+    t_series = self._temp_to_celsius(
+        _weighted_nanmean(t_cells),
+        dict(ds[t_name].attrs).get("units"),
+        t_name,
+    )
 
-    def _pet_series(sub):
+    def _pet_series(sub, var_name: Optional[str]):
       """Area-weighted daily PET in mm/day, or None if the variable is absent."""
-      if sub is None:
+      if sub is None or var_name is None:
         return None
       cells = sub[:, rel_lat_idx, rel_lon_idx]
       if np.all(np.isnan(cells)):
         return None
       series = _weighted_nanmean(cells)
-      # ERA5 stores evaporation as a negative flux; magnitudes below 0.5 imply
-      # metres rather than mm.
-      if np.nanmax(np.abs(series)) < 0.5:
-        return np.abs(series) * 1000.0
-      return np.abs(series)
+      units = dict(ds[var_name].attrs).get("units")
+      return np.abs(self._depth_to_mm(series, units, var_name))
 
-    pet_fao_series = _pet_series(pet_fao_sub)
-    pet_era5_series = _pet_series(pet_era5_sub)
+    pet_fao_series = _pet_series(pet_fao_sub, pet_fao_name)
+    pet_era5_series = _pet_series(pet_era5_sub, pet_era5_name)
 
     if pet_fao_series is None:
       logger.warning(
@@ -776,26 +851,13 @@ class ERA5GriddedExtractor:
           self.zarr_uri,
       )
 
-    # Unit conversions
-    if np.nanmean(t_series) > 100.0:
-      t_series = t_series - 273.15  # Kelvin to Celsius
-
-    if np.nanmax(p_series) < 0.5:
-      p_series = p_series * 1000.0  # Meters to mm
-
     # Time coordinate
     time_keys = [k for k in ["time", "date"] if k in ds]
-    if time_keys:
-      time_arr = ds[time_keys[0]][:]
-      time_attrs = dict(ds[time_keys[0]].attrs)
-      units = time_attrs.get("units", "days since 1980-01-01 00:00:00")
-      if "since" in units:
-        base_str = units.split("since")[-1].strip()
-        date_index = pd.to_datetime(base_str) + pd.to_timedelta(time_arr, unit="D")
-      else:
-        date_index = pd.date_range("1980-01-01", periods=len(time_arr), freq="D")
-    else:
-      date_index = pd.date_range("1980-01-01", periods=len(p_series), freq="D")
+    if not time_keys:
+      raise KeyError(f"Time coordinate ('time' or 'date') not found in {self.zarr_uri}")
+    time_arr = np.asarray(ds[time_keys[0]][:])
+    time_attrs = dict(ds[time_keys[0]].attrs)
+    date_index = self._parse_time_coordinate(time_arr, time_attrs, self.zarr_uri)
 
     p_s = pd.Series(p_series, index=date_index)
     t_s = pd.Series(t_series, index=date_index)

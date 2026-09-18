@@ -146,19 +146,11 @@ def compute_continuous_metrics(
   std_t = float(np.std(y_t))
   std_p = float(np.std(y_p))
   if std_t < 1e-9 or std_p < 1e-9:
-    pearson_r_val = 1.0 if np.allclose(y_t, y_p, atol=1e-5) else 0.0
-    spearman_rho_val = pearson_r_val
+    pearson_r_val = np.nan
+    spearman_rho_val = np.nan
   else:
-    try:
-      pearson_r_val, _ = pearsonr(y_t, y_p)
-      spearman_rho_val, _ = spearmanr(y_t, y_p)
-      if np.isnan(pearson_r_val):
-        pearson_r_val = 1.0 if np.allclose(y_t, y_p, atol=1e-5) else 0.0
-      if np.isnan(spearman_rho_val):
-        spearman_rho_val = pearson_r_val
-    except Exception:
-      pearson_r_val = 1.0 if np.allclose(y_t, y_p, atol=1e-5) else 0.0
-      spearman_rho_val = pearson_r_val
+    pearson_r_val, _ = pearsonr(y_t, y_p)
+    spearman_rho_val, _ = spearmanr(y_t, y_p)
 
   diff = y_p - y_t
   abs_diff = np.abs(diff)
@@ -171,7 +163,7 @@ def compute_continuous_metrics(
   if ss_tot > 1e-9:
     r2_val = 1.0 - (ss_res / ss_tot)
   else:
-    r2_val = 1.0 if ss_res < 1e-9 else 0.0
+    r2_val = np.nan
 
   non_zero = np.abs(y_t) > 1e-5
   if np.any(non_zero):
@@ -179,8 +171,8 @@ def compute_continuous_metrics(
     med_rel_err = float(np.median(rel_errors))
     max_rel_err = float(np.max(rel_errors))
   else:
-    med_rel_err = 0.0 if np.allclose(y_t, y_p, atol=1e-5) else 100.0
-    max_rel_err = 0.0 if np.allclose(y_t, y_p, atol=1e-5) else 100.0
+    med_rel_err = np.nan
+    max_rel_err = np.nan
 
   return {
       "n": n,
@@ -241,14 +233,14 @@ def _worker_evaluate_basin(args: tuple) -> Dict[str, Any]:
 
     extracted_attrs = res.get("caravan_attributes", {})
     calc_area = float(
-        extracted_attrs.get("basin_area", res.get("total_area_km2", 0.0))
+        extracted_attrs.get("basin_area", res.get("total_area_km2", np.nan))
     )
     subbasins_count = int(res.get("intersected_subbasins_count", 0))
 
     area_bias_pct = (
         float((calc_area - ref_area_km2) / ref_area_km2 * 100.0)
         if ref_area_km2 > 0
-        else 0.0
+        else np.nan
     )
 
     return {
@@ -274,9 +266,9 @@ def _worker_evaluate_basin(args: tuple) -> Dict[str, Any]:
         "size_tier": size_tier,
         "country": country,
         "ref_area_km2": ref_area_km2,
-        "calc_area_km2": 0.0,
-        "area_bias_pct": -100.0,
-        "abs_area_err_pct": 100.0,
+        "calc_area_km2": np.nan,
+        "area_bias_pct": np.nan,
+        "abs_area_err_pct": np.nan,
         "subbasins_count": 0,
         "elapsed_sec": round(elapsed, 3),
         "extracted_attrs": {},
