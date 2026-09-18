@@ -21,10 +21,12 @@ ready gridded archives that back Open-MultiMet:
   precipitation (0.5 degree, 1979 to present).
 * :mod:`multimet.build_hres_archive` - ECMWF IFS HRES daily surface forecasts
   at lead days 1..10 (0.25 degree, 2016 to present).
+* :mod:`multimet.build_imerg_archive` - NASA GPM IMERG Early V07 daily
+  precipitation (0.1 degree, 2000 to present).
 
 Each module is independently runnable and exposes a console script
-(``build-cpc-archive`` / ``build-hres-archive``). See ``multimet/README.md``
-for the full usage guide.
+(``build-cpc-archive`` / ``build-hres-archive`` / ``build-imerg-archive``). See
+``multimet/README.md`` for the full usage guide.
 
 Submodules are imported lazily so that importing :mod:`multimet` stays cheap
 and does not require the optional cloud/GRIB dependencies to be installed.
@@ -38,6 +40,7 @@ from typing import Any
 __all__ = [
     "build_cpc_archive",
     "build_hres_archive",
+    "build_imerg_archive",
 ]
 
 _SUBMODULES = frozenset(__all__)

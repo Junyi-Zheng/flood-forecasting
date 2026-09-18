@@ -55,6 +55,7 @@ setup(
             'run=googlehydrology.run:_main',
             'build-cpc-archive=multimet.build_cpc_archive:main',
             'build-hres-archive=multimet.build_hres_archive:main',
+            'build-imerg-archive=multimet.build_imerg_archive:main',
         ]
     },
     python_requires='>=3.12',

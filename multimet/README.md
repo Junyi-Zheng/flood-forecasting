@@ -11,8 +11,9 @@ consumers can open one store and slice it by date.
 
 | Module | Product | Resolution | Coverage | Output store |
 | --- | --- | --- | --- | --- |
-| [`build_cpc_archive.py`](build_cpc_archive.py) | NOAA CPC Global Unified gauge-based daily precipitation | 0.5° | 1979 → present | `gs://open-multimet/data/cpc/daily_surface.zarr` |
-| [`build_hres_archive.py`](build_hres_archive.py) | ECMWF IFS HRES daily surface forecast, lead days 1–10 | 0.25° | 2016 → present | `gs://open-multimet/data/hres/daily_surface.zarr` |
+| [`build_cpc_archive.py`](build_cpc_archive.py) | NOAA CPC Global Unified gauge-based daily precipitation | 0.5° | 1979 → present | `gs://open-multimet/gridded-data-archives/CPC/daily_surface.zarr` |
+| [`build_hres_archive.py`](build_hres_archive.py) | ECMWF IFS HRES daily surface forecast, lead days 1–10 | 0.25° | 2016 → present | `gs://open-multimet/gridded-data-archives/HRES/daily_surface.zarr` |
+| [`build_imerg_archive.py`](build_imerg_archive.py) | NASA GPM IMERG Early V07 daily precipitation | 0.1° | 2000 → present | `gs://open-multimet/gridded-data-archives/IMERG/daily_surface.zarr` |
 
 > **Scope.** These builders produce *gridded* archives. Reducing those grids to
 > basin-averaged time series is a separate concern and is not part of this
@@ -29,6 +30,7 @@ pip install -e .
 
 build-cpc-archive --help
 build-hres-archive --help
+build-imerg-archive --help
 ```
 
 Equivalently, run them as modules:
@@ -36,6 +38,7 @@ Equivalently, run them as modules:
 ```bash
 python -m multimet.build_cpc_archive --help
 python -m multimet.build_hres_archive --help
+python -m multimet.build_imerg_archive --help
 ```
 
 ### Dependencies
