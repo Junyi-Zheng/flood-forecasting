@@ -105,16 +105,19 @@ def is_remote_target(target: str) -> bool:
 def patch_gcsfs_session_shutdown() -> None:
   """Silences the benign cross-loop aiohttp RuntimeError at interpreter exit.
 
-  When ``zarr`` v3 (which runs its own asyncio loop thread) and ``gcsfs``
-  (which runs ``fsspec.asyn.loop[0]``) are used in the same process, ``gcsfs``'s
+  During interpreter finalization (``sys.is_finalizing()``), ``gcsfs``'s
   ``weakref.finalize`` callback ``GCSFileSystem.close_session`` attempts to
-  schedule ``session.close()`` on ``fsspec.asyn.loop[0]`` during interpreter
-  shutdown. Because the ``aiohttp`` connector futures belong to ``zarr``'s loop,
-  ``asyncio`` raises ``RuntimeError: Task ... got Future ... attached to a
-  different loop`` and logs ``Task was destroyed but it is pending!``. Using
-  ``gcsfs``'s own synchronous shutdown fallback (``connector._close()``) avoids
-  cross-loop scheduling during interpreter teardown.
+  schedule ``session.close()`` on ``fsspec.asyn.loop[0]``. When ``zarr`` v3 is
+  also active, the connector futures may belong to ``zarr``'s loop, raising
+  ``RuntimeError: Task ... got Future ... attached to a different loop``.
+  During normal runtime ``orig_close`` is called unchanged; only during
+  interpreter finalization (or if ``orig_close`` raises ``RuntimeError``) do we
+  fall back to ``connector._close()``.
   """
+  import atexit
+  import logging
+  import sys
+
   try:
     import gcsfs.core  # type: ignore[import-untyped]
   except ImportError:
@@ -124,16 +127,34 @@ def patch_gcsfs_session_shutdown() -> None:
   if orig_close is None or getattr(orig_close, '_multimet_patched', False):
     return
 
+  _shutting_down = False
+
+  def _mark_shutting_down() -> None:
+    nonlocal _shutting_down
+    _shutting_down = True
+    logging.getLogger('asyncio').setLevel(logging.CRITICAL)
+
+  atexit.register(_mark_shutting_down)
+
   def _safe_close_session(loop: object, session: object, asynchronous: bool = False) -> None:
-    del loop, asynchronous
+    if _shutting_down or sys.is_finalizing():
+      try:
+        if not getattr(session, 'closed', True):
+          connector = getattr(session, '_connector', None)
+          if connector is not None:
+            connector._close()
+      except Exception:  # noqa: BLE001
+        pass
+      return
     try:
-      if getattr(session, 'closed', True):
-        return
-      connector = getattr(session, '_connector', None)
-      if connector is not None:
-        connector._close()
-    except Exception:  # noqa: BLE001 - best-effort cleanup during atexit.
-      pass
+      orig_close(loop, session, asynchronous=asynchronous)
+    except Exception:  # noqa: BLE001
+      try:
+        connector = getattr(session, '_connector', None)
+        if connector is not None:
+          connector._close()
+      except Exception:  # noqa: BLE001
+        pass
 
   _safe_close_session._multimet_patched = True  # type: ignore[attr-defined]
   gcsfs.core.GCSFileSystem.close_session = staticmethod(_safe_close_session)
