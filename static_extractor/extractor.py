@@ -263,6 +263,51 @@ class StaticAttributesExtractor:
     self.era5_loader = ERA5ClimateLoader(cache_dir=self.era5_cache_dir)
     self.gridded_extractor = ERA5GriddedExtractor(zarr_uri=self.gridded_era5_uri)
 
+  def _era5_land_variants_from_gridded(
+      self,
+      geom,
+      baseline_years,
+      catchment_id: str,
+  ) -> Dict[str, float]:
+    """Computes only the *_ERA5_LAND climate attributes from the gridded store.
+
+    The precomputed HydroATLAS continental tables hold a single set of climate
+    indices, derived from FAO-56 Penman-Monteith PET. Those belong in the
+    unsuffixed and *_FAO_PM columns. The *_ERA5_LAND columns need ERA5-Land's
+    own potential evaporation, which only the gridded archive carries, so they
+    are computed separately here rather than aliased from the FAO values.
+
+    Note this makes the otherwise-fast 'hybas' path read the gridded store.
+
+    Args:
+      geom: Catchment geometry to extract over.
+      baseline_years: (start_year, end_year) climate baseline.
+      catchment_id: Identifier used for logging only.
+
+    Returns:
+      The four *_ERA5_LAND attributes, or an empty dict if the gridded store
+      could not be read, in which case the caller's existing values stand.
+    """
+    keys = (
+        "pet_mean_ERA5_LAND",
+        "aridity_ERA5_LAND",
+        "moisture_index_ERA5_LAND",
+        "seasonality_ERA5_LAND",
+    )
+    try:
+      gridded = self.gridded_extractor.extract_climate_metrics_for_polygon(
+          geom, baseline_years=baseline_years
+      )
+    except Exception as e:  # pylint: disable=broad-except
+      logger.warning(
+          "Could not compute ERA5-Land climate variants for catchment '%s' "
+          "from the gridded archive: %s",
+          catchment_id,
+          e,
+      )
+      return {}
+    return {k: gridded[k] for k in keys if k in gridded}
+
   def _read_subbasins_in_bbox(
       self, bbox: Tuple[float, float, float, float]
   ) -> gpd.GeoDataFrame:
@@ -533,6 +578,13 @@ class StaticAttributesExtractor:
       ]
       era5_indices = self.era5_loader.get_indices_for_subbasins(
           hybas_ids, intersect_weights
+      )
+      # These tables are FAO-based and have no ERA5-Land counterpart, so the
+      # *_ERA5_LAND columns come from the gridded archive instead.
+      era5_indices.update(
+          self._era5_land_variants_from_gridded(
+              geom, baseline_years, catchment_id
+          )
       )
 
     for k, v in era5_indices.items():

@@ -634,12 +634,26 @@ class ERA5GriddedExtractor:
         ),
         None,
     )
-    pet_name = next(
+    # Two distinct PET series. The FAO-56 Penman-Monteith variable feeds the
+    # unsuffixed and *_FAO_PM attributes; ERA5-Land's own potential evaporation
+    # feeds the *_ERA5_LAND attributes. Selecting only the first match here is
+    # what previously made the two families identical.
+
+    pet_fao_name = next(
         (
             v
             for v in [
                 "era5land_potential_evaporation_FAO_PENMAN_MONTEITH",
                 "era5land_potential_evaporation_DEPRECATED",
+            ]
+            if v in ds
+        ),
+        None,
+    )
+    pet_era5_name = next(
+        (
+            v
+            for v in [
                 "potential_evaporation",
                 "pev",
                 "pet",
@@ -664,7 +678,16 @@ class ERA5GriddedExtractor:
     # Read data sub-cube
     p_sub = ds[p_name][:, min_lat_i:max_lat_i, min_lon_i:max_lon_i]
     t_sub = ds[t_name][:, min_lat_i:max_lat_i, min_lon_i:max_lon_i]
-    pet_sub = ds[pet_name][:, min_lat_i:max_lat_i, min_lon_i:max_lon_i] if pet_name else None
+    pet_fao_sub = (
+        ds[pet_fao_name][:, min_lat_i:max_lat_i, min_lon_i:max_lon_i]
+        if pet_fao_name
+        else None
+    )
+    pet_era5_sub = (
+        ds[pet_era5_name][:, min_lat_i:max_lat_i, min_lon_i:max_lon_i]
+        if pet_era5_name
+        else None
+    )
 
     # Extract indexed cells (time, num_cells)
     p_cells = p_sub[:, rel_lat_idx, rel_lon_idx]
@@ -702,11 +725,30 @@ class ERA5GriddedExtractor:
     p_series = np.nansum(p_cells * w_matrix, axis=1)
     t_series = np.nansum(t_cells * w_matrix, axis=1)
 
-    if pet_sub is not None:
-      pet_cells = pet_sub[:, rel_lat_idx, rel_lon_idx]
-      pet_series = np.nansum(pet_cells * w_matrix, axis=1)
-    else:
-      pet_series = np.full_like(p_series, 2.0)
+    def _pet_series(sub):
+      """Area-weighted daily PET in mm/day, or None if the variable is absent."""
+      if sub is None:
+        return None
+      cells = sub[:, rel_lat_idx, rel_lon_idx]
+      series = np.nansum(cells * w_matrix, axis=1)
+      # ERA5 stores evaporation as a negative flux; magnitudes below 0.5 imply
+      # metres rather than mm.
+      if np.nanmax(np.abs(series)) < 0.5:
+        return np.abs(series) * 1000.0
+      return np.abs(series)
+
+    pet_fao_series = _pet_series(pet_fao_sub)
+    pet_era5_series = _pet_series(pet_era5_sub)
+
+    if pet_fao_series is None and pet_era5_series is None:
+      pet_era5_series = np.full_like(p_series, 2.0)
+    elif pet_era5_series is None:
+      logger.warning(
+          "No native ERA5-Land potential evaporation variable found in %s; "
+          "the *_ERA5_LAND attributes will repeat the FAO-PM values.",
+          self.zarr_uri,
+      )
+      pet_era5_series = pet_fao_series
 
     # Unit conversions
     if np.nanmean(t_series) > 100.0:
@@ -714,11 +756,6 @@ class ERA5GriddedExtractor:
 
     if np.nanmax(p_series) < 0.5:
       p_series = p_series * 1000.0  # Meters to mm
-
-    if np.nanmax(np.abs(pet_series)) < 0.5:
-      pet_series = np.abs(pet_series) * 1000.0
-    else:
-      pet_series = np.abs(pet_series)
 
     # Time coordinate
     time_keys = [k for k in ["time", "date"] if k in ds]
@@ -736,7 +773,12 @@ class ERA5GriddedExtractor:
 
     p_s = pd.Series(p_series, index=date_index)
     t_s = pd.Series(t_series, index=date_index)
-    pet_s = pd.Series(pet_series, index=date_index)
+    pet_era5_s = pd.Series(pet_era5_series, index=date_index)
+    pet_fao_s = (
+        pd.Series(pet_fao_series, index=date_index)
+        if pet_fao_series is not None
+        else None
+    )
 
     if baseline_years is not None:
       start_y, end_y = baseline_years
@@ -744,6 +786,10 @@ class ERA5GriddedExtractor:
       if np.any(mask_dates):
         p_s = p_s.loc[mask_dates]
         t_s = t_s.loc[mask_dates]
-        pet_s = pet_s.loc[mask_dates]
+        pet_era5_s = pet_era5_s.loc[mask_dates]
+        if pet_fao_s is not None:
+          pet_fao_s = pet_fao_s.loc[mask_dates]
 
-    return compute_caravan_climate_metrics(p_s, t_s, pet_s)
+    return compute_caravan_climate_metrics(
+        p_s, t_s, pet_era5=pet_era5_s, pet_fao=pet_fao_s
+    )
