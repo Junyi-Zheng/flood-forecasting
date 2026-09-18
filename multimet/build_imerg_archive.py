@@ -71,13 +71,16 @@ import pandas as pd
 import requests
 import tqdm
 import xarray as xr
-import zarr
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
   sys.path.insert(0, _REPO_ROOT)
 
-from multimet.storage import NON_RETRYABLE_ERRORS, resolve_zarr_target
+from multimet.storage import (  # noqa: E402
+    resolve_zarr_target,
+    write_dataset_batch_in_place,
+    write_dataset_batch_to_zarr,
+)
 
 DEFAULT_PROJECT = "global-ungauged-experiments"
 DEFAULT_TARGET_ZARR = "open-multimet/gridded-data-archives/IMERG/daily_surface.zarr"
@@ -545,57 +548,15 @@ def write_batch_to_zarr(
     max_retries: int = 5,
 ) -> None:
   """Writes or appends a batch of dates to the target Zarr store with retries."""
-  full_url, is_gcs = resolve_zarr_target(target_zarr_url)
-  clean_path = full_url.replace("gs://", "") if is_gcs else full_url
-
-  for attempt in range(max_retries):
-    try:
-      if is_gcs:
-        if gcsfs is not None:
-          fs = gcsfs.GCSFileSystem(project=project)
-          mapper = fs.get_mapper(clean_path)
-        else:
-          mapper = fsspec.get_mapper(full_url)
-      else:
-        mapper = full_url
-
-      if is_initial_write:
-        logging.info("Writing initial Zarr schema to %s...", full_url)
-        encoding = {
-            var: {
-                "chunks": (
-                    1,
-                    len(ds_batch["latitude"]),
-                    len(ds_batch["longitude"]),
-                )
-            }
-            for var in ds_batch.data_vars
-        }
-        ds_batch.to_zarr(
-            mapper, mode="w", consolidated=consolidated, encoding=encoding
-        )
-      else:
-        logging.info(
-            "Appending %d dates along time dimension...", len(ds_batch["time"])
-        )
-        ds_batch.to_zarr(
-            mapper, mode="a", append_dim="time", consolidated=consolidated
-        )
-      return
-    except NON_RETRYABLE_ERRORS:
-      raise
-    except Exception as e:  # noqa: BLE001
-      wait_secs = 5 * (2**attempt)
-      logging.warning(
-          "Error writing batch to Zarr (attempt %d/%d): %s. Retrying in %ds...",
-          attempt + 1,
-          max_retries,
-          e,
-          wait_secs,
-      )
-      if attempt == max_retries - 1:
-        raise
-      time.sleep(wait_secs)
+  write_dataset_batch_to_zarr(
+      ds_batch,
+      target_zarr_url,
+      project=project,
+      is_initial_write=is_initial_write,
+      consolidated=consolidated,
+      time_chunk_size=1,
+      max_retries=max_retries,
+  )
 
 
 def write_batch_in_place(
@@ -606,64 +567,13 @@ def write_batch_in_place(
     max_retries: int = 5,
 ) -> None:
   """Writes a batch of dates directly in-place into existing Zarr array slices."""
-  full_url, is_gcs = resolve_zarr_target(target_zarr_url)
-  clean_path = full_url.replace("gs://", "") if is_gcs else full_url
-
-  for attempt in range(max_retries):
-    try:
-      if is_gcs:
-        if gcsfs is not None:
-          fs = gcsfs.GCSFileSystem(project=project)
-          mapper = fs.get_mapper(clean_path)
-        else:
-          mapper = fsspec.get_mapper(full_url)
-      else:
-        mapper = full_url
-
-      if date_to_idx is None:
-        existing_ds = xr.open_zarr(mapper, consolidated=False)
-        time_pd = pd.to_datetime(existing_ds["time"].values)
-        date_to_idx = {t.strftime("%Y-%m-%d"): i for i, t in enumerate(time_pd)}
-
-      batch_times = pd.to_datetime(ds_batch["time"].values)
-      missing_dates = [
-          t.strftime("%Y-%m-%d")
-          for t in batch_times
-          if t.strftime("%Y-%m-%d") not in date_to_idx
-      ]
-      if missing_dates:
-        raise ValueError(
-            f"Dates not found in target store for in-place write: {missing_dates}"
-        )
-
-      indices = [date_to_idx[t.strftime("%Y-%m-%d")] for t in batch_times]
-      root = zarr.open_group(mapper, mode="r+")
-      is_contiguous = indices == list(
-          range(indices[0], indices[0] + len(indices))
-      )
-
-      for var in ds_batch.data_vars:
-        vals = ds_batch[var].values
-        if is_contiguous:
-          root[var][indices[0] : indices[-1] + 1] = vals
-        else:
-          for i, target_idx in enumerate(indices):
-            root[var][target_idx : target_idx + 1] = vals[i : i + 1]
-      return
-    except (NON_RETRYABLE_ERRORS, ValueError):
-      raise
-    except Exception as e:  # noqa: BLE001
-      wait_secs = 5 * (2**attempt)
-      logging.warning(
-          "Error writing batch in-place (attempt %d/%d): %s. Retrying in %ds...",
-          attempt + 1,
-          max_retries,
-          e,
-          wait_secs,
-      )
-      if attempt == max_retries - 1:
-        raise
-      time.sleep(wait_secs)
+  write_dataset_batch_in_place(
+      ds_batch,
+      target_zarr_url,
+      project=project,
+      date_to_idx=date_to_idx,
+      max_retries=max_retries,
+  )
 
 
 def build_imerg_archive(
@@ -1015,14 +925,7 @@ def main(argv: Sequence[str] | None = None) -> None:
       earthdata_token=args.earthdata_token,
       netrc_path=args.netrc_path,
   )
-  if argv is None:
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(0)
 
 
 if __name__ == "__main__":
-  main(sys.argv[1:])
-  sys.stdout.flush()
-  sys.stderr.flush()
-  os._exit(0)
+  main()

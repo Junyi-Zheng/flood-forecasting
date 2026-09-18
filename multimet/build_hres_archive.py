@@ -58,13 +58,16 @@ import numpy as np
 import pandas as pd
 import tqdm
 import xarray as xr
-import zarr
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
   sys.path.insert(0, _REPO_ROOT)
 
-from multimet.storage import NON_RETRYABLE_ERRORS, resolve_zarr_target
+from multimet.storage import (  # noqa: E402
+    resolve_zarr_target,
+    write_dataset_batch_in_place,
+    write_dataset_batch_to_zarr,
+)
 
 DEFAULT_PROJECT = "global-ungauged-experiments"
 DEFAULT_TARGET_ZARR = "open-multimet/gridded-data-archives/HRES/daily_surface.zarr"
@@ -294,34 +297,41 @@ _target_lon: np.ndarray | None = None
 
 def _init_worker(project: str) -> None:
   del project  # Unused by public anonymous sources.
-  global _worker_wb2, _worker_open_data, _target_lat, _target_lon
-  _worker_wb2 = WeatherBench2Source()
-  _worker_open_data = ECMWFOpenDataSource()
-  _target_lat = _worker_wb2.latitudes
-  _target_lon = _worker_wb2.longitudes
+  wb2 = WeatherBench2Source()
+  globals().update({
+      "_worker_wb2": wb2,
+      "_worker_open_data": ECMWFOpenDataSource(),
+      "_target_lat": wb2.latitudes,
+      "_target_lon": wb2.longitudes,
+  })
 
 
 def _extract_single_date(
     dt: pd.Timestamp,
 ) -> tuple[pd.Timestamp, dict[str, np.ndarray]]:
-  global _worker_wb2, _worker_open_data, _target_lat, _target_lon
   date_data = None
   for extract_attempt in range(3):
     try:
       if dt <= WB2_CUTOFF_DATE:
-        date_data = _worker_wb2.extract_date(dt)
+        date_data = _worker_wb2.extract_date(dt)  # type: ignore[union-attr]
       elif dt < OPEN_DATA_START_DATE:
         # 6-month gap between WeatherBench 2 (2023-01-10) and ECMWF Open Data (2023-07-13).
         # Initialized with NaN slice to preserve a contiguous daily time axis.
         date_data = None
         break
       else:
-        date_data = _worker_open_data.extract_date(dt, _target_lat, _target_lon)
+        date_data = _worker_open_data.extract_date(  # type: ignore[union-attr]
+            dt, _target_lat, _target_lon
+        )
       if date_data is not None:
         break
     except Exception as e:
-      if "No module named 'eccodes'" in str(e) or (isinstance(e, ModuleNotFoundError) and "eccodes" in str(e)):
-        logging.error("FATAL: 'eccodes' is not installed in this python environment! Please install python-eccodes/eccodes.")
+      if "No module named 'eccodes'" in str(e) or (
+          isinstance(e, ModuleNotFoundError) and "eccodes" in str(e)
+      ):
+        logging.error(
+            "FATAL: 'eccodes' is not installed in this python environment! Please install python-eccodes/eccodes."
+        )
         raise
       logging.warning(
           "Error extracting date %s (attempt %d/3): %s",
@@ -338,7 +348,7 @@ def _extract_single_date(
         "No data found for date %s, inserting NaN slice",
         dt.strftime("%Y-%m-%d"),
     )
-    shape = (NUM_LEAD_DAYS, len(_target_lat), len(_target_lon))
+    shape = (NUM_LEAD_DAYS, len(_target_lat), len(_target_lon))  # type: ignore[arg-type]
     date_data = {
         var: np.full(shape, np.nan, dtype=np.float32)
         for var in HRES_VARIABLES
@@ -396,48 +406,15 @@ def write_batch_to_zarr(
     max_retries: int = 5,
 ) -> None:
   """Writes or appends a batch of dates to the target Zarr store with retries."""
-  full_url, is_remote = resolve_zarr_target(target_zarr_url)
-  is_local = not is_remote
-  clean_path = full_url.replace("gs://", "") if is_remote else full_url
-  mapper = full_url
-
-  for attempt in range(max_retries):
-    try:
-      if not is_local:
-        if gcsfs is not None:
-          fs = gcsfs.GCSFileSystem(project=project, requester_pays=project)
-          mapper = fs.get_mapper(clean_path)
-        else:
-          mapper = fsspec.get_mapper(full_url)
-
-      if is_initial_write:
-        logging.info("Writing initial Zarr schema to %s...", full_url)
-        encoding = {
-            var: {"chunks": (1, 10, len(ds_batch["latitude"]), len(ds_batch["longitude"]))}
-            for var in ds_batch.data_vars
-        }
-        ds_batch.to_zarr(mapper, mode="w", consolidated=consolidated, encoding=encoding)
-      else:
-        logging.info("Appending %d dates along time dimension...", len(ds_batch["time"]))
-        ds_batch.to_zarr(mapper, mode="a", append_dim="time", consolidated=consolidated)
-      return
-    except NON_RETRYABLE_ERRORS:
-      # A missing storage driver or a malformed location will fail the same
-      # way on every attempt, so retrying only delays the real error.
-      raise
-    except Exception as e:
-      wait_secs = 5 * (2 ** attempt)
-      logging.warning(
-          "Error writing batch to Zarr (attempt %d/%d): %s. Retrying in %ds...",
-          attempt + 1,
-          max_retries,
-          e,
-          wait_secs,
-      )
-      if attempt == max_retries - 1:
-        raise
-      import time
-      time.sleep(wait_secs)
+  write_dataset_batch_to_zarr(
+      ds_batch,
+      target_zarr_url,
+      project=project,
+      is_initial_write=is_initial_write,
+      consolidated=consolidated,
+      time_chunk_size=1,
+      max_retries=max_retries,
+  )
 
 
 def write_batch_in_place(
@@ -448,64 +425,13 @@ def write_batch_in_place(
     max_retries: int = 5,
 ) -> None:
   """Writes a batch of dates directly in-place into existing Zarr array slices."""
-  full_url, is_remote = resolve_zarr_target(target_zarr_url)
-  if not is_remote:
-    mapper = full_url
-  elif gcsfs is not None:
-    fs = gcsfs.GCSFileSystem(project=project, requester_pays=project)
-    mapper = fs.get_mapper(full_url.replace("gs://", ""))
-  else:
-    mapper = fsspec.get_mapper(full_url)
-
-  root = zarr.open_group(mapper, mode="r+")
-
-  if date_to_idx is None:
-    existing_ds = xr.open_zarr(mapper, consolidated=False)
-    time_pd = pd.to_datetime(existing_ds["time"].values)
-    date_to_idx = {t.strftime("%Y-%m-%d"): i for i, t in enumerate(time_pd)}
-
-  batch_dates = pd.to_datetime(ds_batch["time"].values)
-  indices = [date_to_idx.get(t.strftime("%Y-%m-%d")) for t in batch_dates]
-
-  if any(idx is None for idx in indices):
-    missing = [
-        t.strftime("%Y-%m-%d")
-        for t, idx in zip(batch_dates, indices, strict=True)
-        if idx is None
-    ]
-    raise ValueError(f"Cannot write in-place: dates {missing} not in target Zarr time coordinate.")
-
-  is_contiguous = indices[-1] - indices[0] == len(indices) - 1 and indices == list(range(indices[0], indices[-1] + 1))
-
-  for attempt in range(max_retries):
-    try:
-      logging.info(
-          "Writing %d dates in-place to Zarr (time indices %d to %d)...",
-          len(indices),
-          indices[0],
-          indices[-1],
-      )
-      for var in ds_batch.data_vars:
-        vals = ds_batch[var].values
-        if is_contiguous:
-          root[var][indices[0] : indices[-1] + 1] = vals
-        else:
-          for i, date_idx in enumerate(indices):
-            root[var][date_idx] = vals[i]
-      return
-    except Exception as e:
-      wait_secs = 5 * (2 ** attempt)
-      logging.warning(
-          "Error writing in-place batch to Zarr (attempt %d/%d): %s. Retrying in %ds...",
-          attempt + 1,
-          max_retries,
-          e,
-          wait_secs,
-      )
-      if attempt == max_retries - 1:
-        raise
-      import time
-      time.sleep(wait_secs)
+  write_dataset_batch_in_place(
+      ds_batch,
+      target_zarr_url,
+      project=project,
+      date_to_idx=date_to_idx,
+      max_retries=max_retries,
+  )
 
 
 def build_hres_archive(

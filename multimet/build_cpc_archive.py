@@ -58,7 +58,10 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
   sys.path.insert(0, _REPO_ROOT)
 
-from multimet.storage import NON_RETRYABLE_ERRORS, resolve_zarr_target
+from multimet.storage import (  # noqa: E402
+    resolve_zarr_target,
+    write_dataset_batch_to_zarr,
+)
 
 DEFAULT_PROJECT = "global-ungauged-experiments"
 DEFAULT_TARGET_ZARR = "open-multimet/gridded-data-archives/CPC/daily_surface.zarr"
@@ -245,63 +248,16 @@ def write_batch_to_zarr(
     max_retries: int = 5,
 ) -> None:
   """Writes or appends a batch of dates to the target Zarr store with exponential retries."""
-  full_url, is_gcs = resolve_zarr_target(target_zarr_url)
-
-  clean_path = full_url.replace("gs://", "") if is_gcs else full_url
-
-  for attempt in range(max_retries):
-    try:
-      if is_gcs:
-        if gcsfs is not None:
-          fs = gcsfs.GCSFileSystem(project=project)
-          mapper = fs.get_mapper(clean_path)
-        else:
-          mapper = fsspec.get_mapper(full_url)
-      else:
-        mapper = full_url
-
-      if is_initial_write:
-        logging.info("Writing initial Zarr schema to %s...", full_url)
-        # Optimal chunking: 30 days x 360 lat x 720 lon (~31MB uncompressed, ~5MB compressed)
-        chunk_days = min(30, len(ds_batch["time"]))
-        encoding = {
-            "cpc_precipitation": {
-                "chunks": (
-                    chunk_days,
-                    len(ds_batch["latitude"]),
-                    len(ds_batch["longitude"]),
-                ),
-            }
-        }
-        ds_batch.to_zarr(
-            mapper, mode="w", consolidated=consolidated, encoding=encoding
-        )
-        logging.info("✓ Successfully initialized Zarr store.")
-      else:
-        logging.info(
-            "Appending %d dates along time dimension...", len(ds_batch["time"])
-        )
-        ds_batch.to_zarr(
-            mapper, mode="a", append_dim="time", consolidated=consolidated
-        )
-        logging.info("✓ Successfully appended dates.")
-      return
-    except NON_RETRYABLE_ERRORS:
-      # A missing storage driver or a malformed location will fail the same
-      # way on every attempt, so retrying only delays the real error.
-      raise
-    except Exception as e:
-      wait_secs = 5 * (2**attempt)
-      logging.warning(
-          "Error writing batch to Zarr (attempt %d/%d): %s. Retrying in %ds...",
-          attempt + 1,
-          max_retries,
-          e,
-          wait_secs,
-      )
-      if attempt == max_retries - 1:
-        raise
-      time.sleep(wait_secs)
+  chunk_days = min(30, len(ds_batch["time"]))
+  write_dataset_batch_to_zarr(
+      ds_batch,
+      target_zarr_url,
+      project=project,
+      is_initial_write=is_initial_write,
+      consolidated=consolidated,
+      time_chunk_size=chunk_days,
+      max_retries=max_retries,
+  )
 
 
 _worker_cache_dir: str = DEFAULT_CACHE_DIR
@@ -318,17 +274,17 @@ def _init_cpc_worker(
     cleanup_cache: bool,
     year_starts: dict[int, pd.Timestamp] | None = None,
 ) -> None:
-  global _worker_cache_dir, _worker_start_date, _worker_end_date, _worker_cleanup_cache, _worker_year_starts
-  _worker_cache_dir = cache_dir
-  _worker_start_date = start_date
-  _worker_end_date = end_date
-  _worker_cleanup_cache = cleanup_cache
-  _worker_year_starts = year_starts or {}
+  globals().update({
+      "_worker_cache_dir": cache_dir,
+      "_worker_start_date": start_date,
+      "_worker_end_date": end_date,
+      "_worker_cleanup_cache": cleanup_cache,
+      "_worker_year_starts": year_starts or {},
+  })
 
 
 def _extract_single_year(year: int) -> tuple[int, xr.Dataset | None]:
   """Worker task to download and transform a single year of CPC precipitation."""
-  global _worker_cache_dir, _worker_start_date, _worker_end_date, _worker_cleanup_cache, _worker_year_starts
   t0 = time.time()
   logging.info(
       "Worker [%d] downloading CPC PSL NetCDF for year %d...",
