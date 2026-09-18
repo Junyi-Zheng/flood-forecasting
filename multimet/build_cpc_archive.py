@@ -56,7 +56,7 @@ import xarray as xr
 from multimet.storage import NON_RETRYABLE_ERRORS, resolve_zarr_target
 
 DEFAULT_PROJECT = "global-ungauged-experiments"
-DEFAULT_TARGET_ZARR = "open-multimet/data/cpc/daily_surface.zarr"
+DEFAULT_TARGET_ZARR = "open-multimet/gridded-data-archives/CPC/daily_surface.zarr"
 DEFAULT_CACHE_DIR = os.path.join(tempfile.gettempdir(), "cpc_cache")
 
 # NOAA PSL publishes CPC Global Unified Precipitation from 1979 onwards.
@@ -506,26 +506,59 @@ def build_cpc_archive(
   total_days_processed = 0
   t0_total = time.time()
 
-  if num_workers > 1 and len(years) > 1:
-    import multiprocessing as mp
+  try:
+    if num_workers > 1 and len(years) > 1:
+      import multiprocessing as mp
 
-    if sys.executable and os.path.exists(sys.executable):
-      try:
-        mp_ctx = mp.get_context("spawn")
-      except Exception:
+      if sys.executable and os.path.exists(sys.executable):
+        try:
+          mp_ctx = mp.get_context("spawn")
+        except Exception:
+          mp_ctx = mp.get_context("fork" if hasattr(os, "fork") else None)
+      else:
         mp_ctx = mp.get_context("fork" if hasattr(os, "fork") else None)
-    else:
-      mp_ctx = mp.get_context("fork" if hasattr(os, "fork") else None)
 
-    logging.info("Spawning worker pool with %d processes...", num_workers)
-    with mp_ctx.Pool(
-        processes=num_workers,
-        initializer=_init_cpc_worker,
-        initargs=(cache_dir, t_start_filter, t_end_filter, cleanup_cache, year_starts),
-    ) as pool:
-      iterator = pool.imap(_extract_single_year, years, chunksize=1)
+      logging.info("Spawning worker pool with %d processes...", num_workers)
+      with mp_ctx.Pool(
+          processes=num_workers,
+          initializer=_init_cpc_worker,
+          initargs=(cache_dir, t_start_filter, t_end_filter, cleanup_cache, year_starts),
+      ) as pool:
+        iterator = pool.imap(_extract_single_year, years, chunksize=1)
+        for y, ds_year in tqdm.tqdm(
+            iterator, total=len(years), desc=f"Processing CPC ({num_workers} workers)"
+        ):
+          t0_write = time.time()
+          if ds_year is None:
+            logging.warning("No data returned for year %d within date filters.", y)
+            continue
+
+          write_batch_to_zarr(
+              ds_year,
+              full_target_url,
+              project=project,
+              is_initial_write=is_first_write,
+              consolidated=has_consolidated,
+          )
+          is_first_write = False
+
+          num_days = len(ds_year["time"])
+          total_days_processed += num_days
+          logging.info(
+              "✓ Year %d completed (%d days) [write took %.2fs]",
+              y,
+              num_days,
+              time.time() - t0_write,
+          )
+    else:
+      logging.info(
+          "Running extraction sequentially (%d worker)...",
+          1 if num_workers <= 1 else num_workers,
+      )
+      _init_cpc_worker(cache_dir, t_start_filter, t_end_filter, cleanup_cache, year_starts)
+      iterator = (_extract_single_year(y) for y in years)
       for y, ds_year in tqdm.tqdm(
-          iterator, total=len(years), desc=f"Processing CPC ({num_workers} workers)"
+          iterator, total=len(years), desc="Processing CPC (sequential)"
       ):
         t0_write = time.time()
         if ds_year is None:
@@ -549,53 +582,21 @@ def build_cpc_archive(
             num_days,
             time.time() - t0_write,
         )
-  else:
+
     logging.info(
-        "Running extraction sequentially (%d worker)...",
-        1 if num_workers <= 1 else num_workers,
+        "🎉 CPC Archive build complete! Processed %d total days across %d years in %.1fs.",
+        total_days_processed,
+        len(years),
+        time.time() - t0_total,
     )
-    _init_cpc_worker(cache_dir, t_start_filter, t_end_filter, cleanup_cache, year_starts)
-    iterator = (_extract_single_year(y) for y in years)
-    for y, ds_year in tqdm.tqdm(
-        iterator, total=len(years), desc="Processing CPC (sequential)"
-    ):
-      t0_write = time.time()
-      if ds_year is None:
-        logging.warning("No data returned for year %d within date filters.", y)
-        continue
-
-      write_batch_to_zarr(
-          ds_year,
-          full_target_url,
-          project=project,
-          is_initial_write=is_first_write,
-          consolidated=has_consolidated,
-      )
-      is_first_write = False
-
-      num_days = len(ds_year["time"])
-      total_days_processed += num_days
-      logging.info(
-          "✓ Year %d completed (%d days) [write took %.2fs]",
-          y,
-          num_days,
-          time.time() - t0_write,
-      )
-
-  logging.info(
-      "🎉 CPC Archive build complete! Processed %d total days across %d years in %.1fs.",
-      total_days_processed,
-      len(years),
-      time.time() - t0_total,
-  )
-  logging.info("Destination store: %s", full_target_url)
-
-  if cleanup_cache and os.path.exists(cache_dir):
-    try:
-      shutil.rmtree(cache_dir)
-      logging.info("Cleaned up cache directory: %s", cache_dir)
-    except OSError:
-      pass
+    logging.info("Destination store: %s", full_target_url)
+  finally:
+    if cleanup_cache and os.path.exists(cache_dir):
+      try:
+        shutil.rmtree(cache_dir)
+        logging.info("Cleaned up cache directory: %s", cache_dir)
+      except OSError:
+        pass
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

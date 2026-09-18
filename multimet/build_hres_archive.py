@@ -14,12 +14,15 @@
 
 """ETL pipeline to build the unified Open-MultiMet daily HRES surface archive.
 
-Ingests ECMWF IFS HRES forecasts from three sources, each covering a disjoint
-slice of the timeline:
+Ingests ECMWF IFS HRES forecasts from public cloud archives:
 
 #. WeatherBench 2 (2016-01-01 to 2023-01-10): public Zarr archive.
-#. Google Flood Forecasting (2023-01-11 to 2023-07-12): 00z NetCDF archive.
 #. ECMWF Open Data (2023-07-13 to present): operational GRIB2 archive.
+
+The intermediate window (2023-01-11 to 2023-07-12) between the end of the
+WeatherBench 2 archive and the start of the ECMWF Open Data archive is
+initialized with NaN slices so that the daily time coordinate stays contiguous
+and can be backfilled in-place.
 
 Aggregates each daily 00z forecast initialization into 10 daily lead steps:
 
@@ -32,7 +35,7 @@ Aggregates each daily 00z forecast initialization into 10 daily lead steps:
 Dates that cannot be retrieved from any source are written as all-NaN slices so
 that the time axis stays contiguous.
 
-Outputs directly to ``gs://open-multimet/data/hres/daily_surface.zarr``.
+Outputs directly to ``gs://open-multimet/gridded-data-archives/HRES/daily_surface.zarr``.
 """
 
 from __future__ import annotations
@@ -59,11 +62,8 @@ import zarr
 from multimet.storage import NON_RETRYABLE_ERRORS, resolve_zarr_target
 
 DEFAULT_PROJECT = "global-ungauged-experiments"
-DEFAULT_TARGET_ZARR = "open-multimet/data/hres/daily_surface.zarr"
+DEFAULT_TARGET_ZARR = "open-multimet/gridded-data-archives/HRES/daily_surface.zarr"
 WB2_HRES_ZARR = "weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr"
-FLOOD_FORECASTING_NC_PATTERN = (
-    "ecmwf-downloads/flood-forecasting/single-levels/daily-surface-regridded/{date}-tp-2t-sp-ssr-str-sf.nc"
-)
 ECMWF_OPEN_DATA_PREFIX = "ecmwf-open-data"
 
 # First forecast initialization date available in WeatherBench 2.
@@ -190,70 +190,6 @@ class WeatherBench2Source:
     }
 
 
-class FloodForecastingGapSource:
-  """Extracts daily aggregates from Google Flood Forecasting NetCDF archive."""
-
-  def __init__(
-      self,
-      pattern: str = FLOOD_FORECASTING_NC_PATTERN,
-      project: str = DEFAULT_PROJECT,
-  ):
-    self.pattern = pattern
-    self.project = project
-    if gcsfs is not None:
-      self.fs = gcsfs.GCSFileSystem(project=self.project, requester_pays=self.project)
-    else:
-      try:
-        self.fs = fsspec.filesystem("gs", project=self.project)
-      except Exception:
-        self.fs = None
-
-  def extract_date(
-      self, date: pd.Timestamp, target_lat: np.ndarray, target_lon: np.ndarray
-  ) -> Optional[Dict[str, np.ndarray]]:
-    """Extracts 10 lead days for a date within the gap period."""
-    path = self.pattern.format(date=date.strftime("%Y-%m-%d"))
-    clean_path = path.replace("gs://", "")
-    full_path = f"gs://{clean_path}"
-
-    exists = False
-    if self.fs is not None:
-      exists = self.fs.exists(clean_path) or self.fs.exists(full_path)
-    else:
-      try:
-        exists = fsspec.filesystem("gs").exists(clean_path)
-      except Exception:  # noqa: BLE001 - treat any lookup failure as "absent".
-        exists = False
-
-    if not exists:
-      return None
-
-    try:
-      if self.fs is not None:
-        opener = self.fs.open(clean_path)
-      else:
-        opener = fsspec.open(full_path, "rb")
-
-      with opener as f:
-        ds = xr.open_dataset(f, engine="h5netcdf")
-        vars_map = {
-            "2t": "temperature_2m",
-            "sp": "surface_pressure",
-            "tp": "total_precipitation",
-            "ssr": "surface_net_solar_radiation",
-            "str": "surface_net_thermal_radiation",
-        }
-        res = {}
-        for src_var, dst_var in vars_map.items():
-          if src_var in ds:
-            res[dst_var] = ds[src_var].values[:10, :, :].astype(np.float32)
-          else:
-            res[dst_var] = np.full((10, len(target_lat), len(target_lon)), np.nan, dtype=np.float32)
-        return res
-    except Exception as e:
-      logging.warning("Error reading Flood Forecasting file %s: %s", path, e)
-      return None
-
 
 class ECMWFOpenDataSource:
   """Extracts daily surface aggregates from ECMWF Open Data GRIB2 using index offsets."""
@@ -345,16 +281,15 @@ class ECMWFOpenDataSource:
 
 
 _worker_wb2: Optional[WeatherBench2Source] = None
-_worker_gap: Optional[FloodForecastingGapSource] = None
 _worker_open_data: Optional[ECMWFOpenDataSource] = None
 _target_lat: Optional[np.ndarray] = None
 _target_lon: Optional[np.ndarray] = None
 
 
 def _init_worker(project: str) -> None:
-  global _worker_wb2, _worker_gap, _worker_open_data, _target_lat, _target_lon
+  del project  # Unused by public anonymous sources.
+  global _worker_wb2, _worker_open_data, _target_lat, _target_lon
   _worker_wb2 = WeatherBench2Source()
-  _worker_gap = FloodForecastingGapSource(project=project)
   _worker_open_data = ECMWFOpenDataSource()
   _target_lat = _worker_wb2.latitudes
   _target_lon = _worker_wb2.longitudes
@@ -363,18 +298,17 @@ def _init_worker(project: str) -> None:
 def _extract_single_date(
     dt: pd.Timestamp,
 ) -> Tuple[pd.Timestamp, Dict[str, np.ndarray]]:
-  global _worker_wb2, _worker_gap, _worker_open_data, _target_lat, _target_lon
+  global _worker_wb2, _worker_open_data, _target_lat, _target_lon
   date_data = None
   for extract_attempt in range(3):
     try:
       if dt <= WB2_CUTOFF_DATE:
         date_data = _worker_wb2.extract_date(dt)
       elif dt < OPEN_DATA_START_DATE:
-        # Six-month gap between the end of WeatherBench 2 (2023-01-10) and the
-        # start of ECMWF Open Data (2023-07-13). Served from the Flood
-        # Forecasting NetCDF archive, which has to be staged separately; dates
-        # with nothing staged fall through to the NaN slice below.
-        date_data = _worker_gap.extract_date(dt, _target_lat, _target_lon)
+        # 6-month gap between WeatherBench 2 (2023-01-10) and ECMWF Open Data (2023-07-13).
+        # Initialized with NaN slice to preserve a contiguous daily time axis.
+        date_data = None
+        break
       else:
         date_data = _worker_open_data.extract_date(dt, _target_lat, _target_lon)
       if date_data is not None:
