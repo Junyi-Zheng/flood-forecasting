@@ -186,7 +186,7 @@ def download_daily_imerg(
     url: str,
     dest_path: str,
     session: Optional[requests.Session] = None,
-    max_retries: int = 5,
+    max_retries: int = 8,
 ) -> str:
   """Downloads a daily IMERG NetCDF4 file from NASA GES DISC with retries."""
   if os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024:
