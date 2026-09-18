@@ -55,14 +55,20 @@ try:
 except ImportError:
   xr = None
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.auth.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="google.auth.*")
+
 from static_extractor.climate import (
     ERA5ClimateLoader,
     ERA5GriddedExtractor,
     compute_caravan_climate_metrics,
+    fetch_caravan_era5_land_variants_batch,
 )
 from static_extractor.config import (
     ADDITIONAL_PROPERTIES,
     ATTRIBUTE_DEFINITIONS,
+    CONTINENT_MAP,
     DEFAULT_ERA5_SOURCE,
     GCS_ERA5_GRIDDED_ZARR_URI,
     GCS_HYDROATLAS_GDB_URI,
@@ -112,6 +118,7 @@ def _worker_extract_polygon(args: tuple) -> Dict[str, Any]:
       catchment_id=gid,
       min_overlap_threshold=min_overlap_threshold,
       era5_source=era5_source,
+      _batch_mode=True,
   )
 
 
@@ -332,6 +339,7 @@ class StaticAttributesExtractor:
       baseline_years: Tuple[int, int] = (1981, 2020),
       timeseries_df: Optional[pd.DataFrame] = None,
       era5_source: Optional[str] = None,
+      _batch_mode: bool = False,
   ) -> Dict[str, Any]:
     """Calculates exact Caravan HydroATLAS static attributes for an arbitrary watershed polygon.
 
@@ -576,13 +584,19 @@ class StaticAttributesExtractor:
       era5_indices = self.era5_loader.get_indices_for_subbasins(
           hybas_ids, intersect_weights
       )
-      # These tables are FAO-based and have no ERA5-Land counterpart, so the
-      # *_ERA5_LAND columns come from the gridded archive instead.
-      era5_indices.update(
-          self._era5_land_variants_from_gridded(
-              geom, baseline_years, catchment_id
-          )
-      )
+      # If a custom/local gridded_era5_uri was provided, read *_ERA5_LAND from it.
+      if self.gridded_era5_uri != GCS_ERA5_GRIDDED_ZARR_URI:
+        era5_indices.update(
+            self._era5_land_variants_from_gridded(
+                geom, baseline_years, catchment_id
+            )
+        )
+      elif not _batch_mode and catchment_id:
+        batch_map = fetch_caravan_era5_land_variants_batch(
+            [catchment_id], baseline_years=baseline_years
+        )
+        if catchment_id in batch_map:
+          era5_indices.update(batch_map[catchment_id])
 
     for k, v in era5_indices.items():
       caravan_attributes[k] = v
@@ -764,10 +778,21 @@ class StaticAttributesExtractor:
       tasks.append((row.geometry, gid))
 
     ds_label = dataset_name or Path(input_path).stem.replace("_basin_shapes", "").replace("_basins", "")
+    actual_era5_source = (era5_source or self.era5_source).lower()
 
     if workers > 1 and len(tasks) > 1:
       import concurrent.futures
       import multiprocessing as mp
+
+      # Pre-stage continental climate tables in the parent process so spawned
+      # workers never race to download them simultaneously.
+      if actual_era5_source == "hybas":
+        for cont_code in sorted(set(CONTINENT_MAP.values())):
+          try:
+            self.era5_loader._ensure_file_on_disk(cont_code)
+          except FileNotFoundError:
+            pass
+
       worker_args = [
           (
               geom,
@@ -820,8 +845,21 @@ class StaticAttributesExtractor:
             catchment_id=gid,
             min_overlap_threshold=min_overlap_threshold,
             era5_source=era5_source,
+            _batch_mode=True,
         )
         results.append(res)
+
+    # In 'hybas' mode (when not using a custom local gridded Zarr store), populate
+    # the four *_ERA5_LAND attributes in a single vectorized batch per dataset.
+    if actual_era5_source == "hybas" and self.gridded_era5_uri == GCS_ERA5_GRIDDED_ZARR_URI:
+      gauge_ids = [r.get("catchment_id", "") for r in results if r]
+      era5_land_map = fetch_caravan_era5_land_variants_batch(
+          gauge_ids=gauge_ids,
+          dataset_name=ds_label,
+      )
+      for r in results:
+        if r and r.get("catchment_id") in era5_land_map:
+          r["caravan_attributes"].update(era5_land_map[r["catchment_id"]])
 
     df = self.export_caravan_csv(
         results, output_csv_path=output_csv_path if output_csv_path else None

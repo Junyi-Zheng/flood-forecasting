@@ -25,6 +25,10 @@ import subprocess
 import sys
 import time
 from typing import Dict, List, Optional, Tuple, Union
+import warnings
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.auth.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="google.auth.*")
 
 import pandas as pd
 from tqdm.auto import tqdm

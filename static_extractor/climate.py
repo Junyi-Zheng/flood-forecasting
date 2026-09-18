@@ -331,32 +331,43 @@ class ERA5ClimateLoader:
     self.records: Dict[int, Dict[str, Any]] = {}
 
   def _download_from_gcs(self, continent_code: str, target_file: Path) -> bool:
-    """Attempts to download continent file from the GCS bucket."""
+    """Attempts to download continent file from the GCS bucket atomically."""
     gcs_src = f"{GCS_ERA5_CLIMATE_URI}/{continent_code}_climate_indices.txt"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = target_file.with_name(f".{target_file.name}.tmp.{os.getpid()}")
+
     try:
-      import gcsfs
+      if shutil.which("gcloud"):
+        try:
+          cmd = ["gcloud", "storage", "cp", gcs_src, str(tmp_file)]
+          res = subprocess.run(cmd, capture_output=True, timeout=120)
+          if res.returncode == 0 and tmp_file.exists() and tmp_file.stat().st_size > 0:
+            os.replace(tmp_file, target_file)
+            return True
+        except Exception as e:
+          logger.debug("gcloud storage download attempt failed: %s", e)
 
       try:
-        fs = gcsfs.GCSFileSystem()
-      except Exception:
-        fs = gcsfs.GCSFileSystem(token="anon")
-      remote_path = gcs_src.replace("gs://", "")
-      if fs.exists(remote_path):
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-        fs.get(remote_path, str(target_file))
-        if target_file.exists() and target_file.stat().st_size > 0:
-          return True
-    except Exception as e:
-      logger.debug("gcsfs download attempt failed: %s", e)
+        import gcsfs
 
-    if shutil.which("gcloud"):
-      try:
-        cmd = ["gcloud", "storage", "cp", gcs_src, str(target_file)]
-        res = subprocess.run(cmd, capture_output=True, timeout=60)
-        if res.returncode == 0 and target_file.exists() and target_file.stat().st_size > 0:
-          return True
+        try:
+          fs = gcsfs.GCSFileSystem()
+        except Exception:
+          fs = gcsfs.GCSFileSystem(token="anon")
+        remote_path = gcs_src.replace("gs://", "")
+        if fs.exists(remote_path):
+          fs.get(remote_path, str(tmp_file))
+          if tmp_file.exists() and tmp_file.stat().st_size > 0:
+            os.replace(tmp_file, target_file)
+            return True
       except Exception as e:
-        logger.debug("gcloud storage download attempt failed: %s", e)
+        logger.debug("gcsfs download attempt failed: %s", e)
+    finally:
+      if tmp_file.exists():
+        try:
+          tmp_file.unlink()
+        except OSError:
+          pass
     return False
 
   def _ensure_file_on_disk(self, continent_code: str) -> bool:
@@ -519,6 +530,7 @@ class ERA5GriddedExtractor:
     """
     self.zarr_uri = zarr_uri or GCS_ERA5_GRIDDED_ZARR_URI
     self._ds = None
+    self._open_error: Optional[Exception] = None
     self._lats: Optional[np.ndarray] = None
     self._lons: Optional[np.ndarray] = None
     self._dlat: float = 0.1
@@ -527,6 +539,8 @@ class ERA5GriddedExtractor:
   def _open_dataset(self):
     if self._ds is not None:
       return self._ds
+    if self._open_error is not None:
+      raise self._open_error
 
     import zarr
 
@@ -544,7 +558,8 @@ class ERA5GriddedExtractor:
       self._dlon = abs(float(self._lons[1] - self._lons[0])) if len(self._lons) > 1 else 0.1
       return self._ds
     except Exception as e:
-      logger.error("Failed to open gridded ERA5 Zarr store at %s: %s", self.zarr_uri, e)
+      self._open_error = e
+      logger.warning("Could not open gridded ERA5 Zarr store at %s: %s", self.zarr_uri, e)
       raise
 
   def compute_zonal_weights(
@@ -747,7 +762,7 @@ class ERA5GriddedExtractor:
             v
             for v in [
                 "era5land_potential_evaporation_FAO_PENMAN_MONTEITH",
-                "era5land_potential_evaporation_DEPRECATED",
+                "potential_evaporation_sum_FAO_PENMAN_MONTEITH",
             ]
             if v in ds
         ),
@@ -757,6 +772,8 @@ class ERA5GriddedExtractor:
         (
             v
             for v in [
+                "era5land_potential_evaporation_DEPRECATED",
+                "potential_evaporation_sum_ERA5_LAND",
                 "potential_evaporation",
                 "pev",
                 "pet",
@@ -886,3 +903,124 @@ class ERA5GriddedExtractor:
     return compute_caravan_climate_metrics(
         p_s, t_s, pet_era5=pet_era5_s, pet_fao=pet_fao_s
     )
+
+
+def fetch_caravan_era5_land_variants_batch(
+    gauge_ids: List[str],
+    dataset_name: Optional[str] = None,
+    baseline_years: Tuple[int, int] = (1981, 2020),
+    timeseries_zarr_uri: str = "gs://open-multimet/caravan-multimet/v1.1/ERA5_LAND/timeseries.zarr",
+) -> Dict[str, Dict[str, float]]:
+  """Computes *_ERA5_LAND climate attributes in a single batch from the Caravan ERA5-Land Zarr store.
+
+  For basins present in the Multimet v1.1 ERA5-Land basin timeseries Zarr store,
+  computes pet_mean_ERA5_LAND, aridity_ERA5_LAND, moisture_index_ERA5_LAND, and
+  seasonality_ERA5_LAND directly from daily era5land_total_precipitation and
+  era5land_potential_evaporation_DEPRECATED over baseline_years. For any remaining
+  Caravan extension basins (e.g. camelsde, camelscz) not in v1.1, reads the four
+  ERA5-Land columns from gs://open-multimet/caravan-old if present.
+  """
+  results: Dict[str, Dict[str, float]] = {}
+  if not gauge_ids:
+    return results
+
+  keys = (
+      "pet_mean_ERA5_LAND",
+      "aridity_ERA5_LAND",
+      "moisture_index_ERA5_LAND",
+      "seasonality_ERA5_LAND",
+  )
+
+  # 1. Vectorized computation from v1.1/ERA5_LAND/timeseries.zarr
+  try:
+    import zarr
+
+    ds = zarr.open(timeseries_zarr_uri, mode="r")
+    zarr_basins = [str(b) for b in ds["basin"][:]]
+    basin_to_idx = {b: i for i, b in enumerate(zarr_basins)}
+    # Also support case-insensitive prefix matching (e.g. grdc_ vs GRDC_)
+    basin_lower_to_idx = {b.lower(): i for i, b in enumerate(zarr_basins)}
+
+    matched_pairs = []
+    for gid in gauge_ids:
+      idx = basin_to_idx.get(gid)
+      if idx is None:
+        idx = basin_lower_to_idx.get(gid.lower())
+      if idx is not None:
+        matched_pairs.append((gid, idx))
+
+    if matched_pairs:
+      dates = pd.to_datetime("1950-01-01") + pd.to_timedelta(ds["date"][:], unit="D")
+      start_y, end_y = baseline_years
+      t_mask = (dates.year >= start_y) & (dates.year <= end_y)
+      months = dates[t_mask].month.values
+
+      indices = [idx for _, idx in matched_pairs]
+      s_idx, e_idx = min(indices), max(indices) + 1
+      rel_indices = [idx - s_idx for idx in indices]
+
+      p_block = np.asarray(ds["era5land_total_precipitation"][s_idx:e_idx, t_mask], dtype=float)[rel_indices]
+      e_block = np.abs(
+          np.asarray(ds["era5land_potential_evaporation_DEPRECATED"][s_idx:e_idx, t_mask], dtype=float)[rel_indices]
+      )
+
+      p_means = np.nanmean(p_block, axis=1)
+      e_means = np.nanmean(e_block, axis=1)
+      aridities = np.where((p_means > 0) & (~np.isnan(p_means)), e_means / p_means, np.nan)
+
+      p_monthly = np.vstack([np.nanmean(p_block[:, months == m], axis=1) for m in range(1, 13)])
+      e_monthly = np.vstack([np.nanmean(e_block[:, months == m], axis=1) for m in range(1, 13)])
+      with np.errstate(divide="ignore", invalid="ignore"):
+        mi_monthly = np.where(
+            p_monthly > e_monthly,
+            1.0 - e_monthly / p_monthly,
+            np.where(p_monthly < e_monthly, p_monthly / e_monthly - 1.0, 0.0),
+        )
+      mi_annual = np.nanmean(mi_monthly, axis=0)
+      seas_annual = np.nanmax(mi_monthly, axis=0) - np.nanmin(mi_monthly, axis=0)
+
+      for k_i, (gid, _) in enumerate(matched_pairs):
+        if not np.isnan(e_means[k_i]):
+          results[gid] = {
+              "pet_mean_ERA5_LAND": round(float(e_means[k_i]), 4),
+              "aridity_ERA5_LAND": round(float(aridities[k_i]), 4),
+              "moisture_index_ERA5_LAND": round(float(mi_annual[k_i]), 4),
+              "seasonality_ERA5_LAND": round(float(seas_annual[k_i]), 4),
+          }
+  except Exception as e:
+    logger.debug("Could not batch-read %s: %s", timeseries_zarr_uri, e)
+
+  # 2. For any remaining basins (e.g. camelsde, camelscz), check caravan-old reference table on GCS
+  missing_gids = [gid for gid in gauge_ids if gid not in results]
+  if missing_gids and dataset_name:
+    ds_clean = dataset_name.lower()
+    try:
+      import gcsfs
+
+      fs = gcsfs.GCSFileSystem()
+      for coll in ("caravan-original", "caravan-extensions", "google-internal"):
+        ref_uri = f"open-multimet/caravan-old/{coll}/attributes/{ds_clean}/attributes_caravan_{ds_clean}.csv"
+        if fs.exists(ref_uri):
+          with fs.open(ref_uri) as f:
+            ref_df = pd.read_csv(f)
+          if "gauge_id" in ref_df.columns:
+            ref_df = ref_df.set_index("gauge_id")
+            for gid in missing_gids:
+              if gid in ref_df.index:
+                row = ref_df.loc[gid]
+                if all(k in row and not pd.isna(row[k]) for k in keys):
+                  results[gid] = {k: round(float(row[k]), 4) for k in keys}
+          break
+    except Exception as e:
+      logger.debug("Could not read caravan-old ERA5-Land fallback for %s: %s", dataset_name, e)
+
+  still_missing = len(gauge_ids) - len(results)
+  if still_missing > 0:
+    logger.warning(
+        "Native ERA5-Land potential evaporation data is unavailable for %d / %d basins%s; "
+        "leaving *_ERA5_LAND attributes as NaN.",
+        still_missing,
+        len(gauge_ids),
+        f" in dataset '{dataset_name}'" if dataset_name else "",
+    )
+  return results
