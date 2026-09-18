@@ -46,7 +46,7 @@ dependencies:
   - nbsphinx
   - netcdf4
   - numpy
-  - pandas
+  - pandas<3
   - parso
   - pyarrow
   - pydantic
