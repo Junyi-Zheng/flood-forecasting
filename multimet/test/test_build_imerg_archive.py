@@ -37,7 +37,6 @@ from multimet.build_imerg_archive import (
     build_imerg_archive,
     parse_imerg_netcdf_to_grid,
     write_batch_in_place,
-    write_batch_to_zarr,
 )
 
 pytestmark = pytest.mark.unit

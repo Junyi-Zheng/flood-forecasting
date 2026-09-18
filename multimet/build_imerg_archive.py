@@ -467,10 +467,12 @@ class LocalImergSource:
 def build_batch_dataset(
     batch_dates: Sequence[pd.Timestamp],
     batch_grids: Sequence[np.ndarray],
-    latitudes: np.ndarray = IMERG_LATS,
-    longitudes: np.ndarray = IMERG_LONS,
+    latitudes: Optional[np.ndarray] = None,
+    longitudes: Optional[np.ndarray] = None,
 ) -> xr.Dataset:
   """Assembles a batch of daily IMERG grids into the canonical Zarr schema."""
+  lats = IMERG_LATS if latitudes is None else latitudes
+  lons = IMERG_LONS if longitudes is None else longitudes
   return xr.Dataset(
       data_vars={
           IMERG_VARIABLE: (
@@ -480,8 +482,8 @@ def build_batch_dataset(
       },
       coords={
           "time": list(batch_dates),
-          "latitude": latitudes,
-          "longitude": longitudes,
+          "latitude": lats,
+          "longitude": lons,
       },
       attrs=dict(IMERG_ATTRS),
   )
