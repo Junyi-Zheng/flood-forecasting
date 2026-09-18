@@ -994,25 +994,28 @@ def fetch_caravan_era5_land_variants_batch(
   missing_gids = [gid for gid in gauge_ids if gid not in results]
   if missing_gids and dataset_name:
     ds_clean = dataset_name.lower()
-    try:
-      import gcsfs
+    import io
 
-      fs = gcsfs.GCSFileSystem()
-      for coll in ("caravan-original", "caravan-extensions", "google-internal"):
-        ref_uri = f"open-multimet/caravan-old/{coll}/attributes/{ds_clean}/attributes_caravan_{ds_clean}.csv"
-        if fs.exists(ref_uri):
-          with fs.open(ref_uri) as f:
-            ref_df = pd.read_csv(f)
-          if "gauge_id" in ref_df.columns:
-            ref_df = ref_df.set_index("gauge_id")
-            for gid in missing_gids:
-              if gid in ref_df.index:
-                row = ref_df.loc[gid]
-                if all(k in row and not pd.isna(row[k]) for k in keys):
-                  results[gid] = {k: round(float(row[k]), 4) for k in keys}
-          break
-    except Exception as e:
-      logger.debug("Could not read caravan-old ERA5-Land fallback for %s: %s", dataset_name, e)
+    for coll in ("caravan-original", "caravan-extensions", "google-internal"):
+      gcs_uri = f"gs://open-multimet/caravan-old/{coll}/attributes/{ds_clean}/attributes_caravan_{ds_clean}.csv"
+      ref_df = None
+      if shutil.which("gcloud"):
+        res_cat = subprocess.run(
+            ["gcloud", "storage", "cat", gcs_uri],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res_cat.returncode == 0 and res_cat.stdout:
+          ref_df = pd.read_csv(io.StringIO(res_cat.stdout))
+      if ref_df is not None and "gauge_id" in ref_df.columns:
+        ref_df = ref_df.set_index("gauge_id")
+        for gid in missing_gids:
+          if gid in ref_df.index:
+            row = ref_df.loc[gid]
+            if all(k in row and not pd.isna(row[k]) for k in keys):
+              results[gid] = {k: round(float(row[k]), 4) for k in keys}
+        break
 
   still_missing = len(gauge_ids) - len(results)
   if still_missing > 0:
