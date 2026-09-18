@@ -131,7 +131,7 @@ def test_pour_point_properties():
 
 
 def test_extractor_wabash_basins_matching_reference():
-  """End-to-end test verifying extracted attributes match official reference data."""
+  """End-to-end test verifying extracted attributes match reference data."""
   wabash_geojson = Path(
       "/usr/local/google/home/gsnearing/Projects/flood-forecasting-multimet/multimet/test/test_data/shapefiles/us/us_basin_shapes.geojson"
   )

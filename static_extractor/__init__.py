@@ -16,7 +16,7 @@
 
 Computes exact area-weighted physiographic, hydro-climatic, soil, land-cover,
 and anthropogenic static attributes for arbitrary watershed polygons following
-the official Caravan and HydroATLAS Level 12 aggregation methodology.
+the Caravan and HydroATLAS Level 12 aggregation methodology.
 """
 
 from static_extractor.climate import (

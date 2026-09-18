@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 # -------------------------------------------------------------------------
-# Official Caravan HydroATLAS Property Definitions & Classifications
+# Caravan HydroATLAS Property Definitions & Classifications
 # Reference: https://github.com/kratzert/Caravan/blob/main/code/Caravan_part1_Earth_Engine.ipynb
 # -------------------------------------------------------------------------
 
@@ -102,7 +102,7 @@ CONTINENT_MAP: Mapping[int, str] = {
     9: "gr",  # Greenland
 }
 
-# 7. Cloud Storage Canonical Data Stores (Authoritative single source of truth)
+# 7. Cloud Storage Data Stores
 GCS_HYDROATLAS_BUCKET: str = "gs://open-multimet/ancillary-data/hydroatlas"
 GCS_HYDROATLAS_GDB_URI: str = f"{GCS_HYDROATLAS_BUCKET}/BasinATLAS_v10.gdb"
 GCS_ERA5_CLIMATE_URI: str = f"{GCS_HYDROATLAS_BUCKET}/era5_climate"
@@ -218,7 +218,7 @@ ATTRIBUTE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
 def get_default_gdb_path() -> Path:
   """Returns the local runtime staging path for BasinATLAS_v10.gdb.
 
-  The authoritative data store is strictly gs://open-multimet/ancillary-data/hydroatlas/BasinATLAS_v10.gdb.
+  The data store is gs://open-multimet/ancillary-data/hydroatlas/BasinATLAS_v10.gdb.
   This local directory serves strictly as a temporary runtime staging cache.
   """
   return (
@@ -233,7 +233,7 @@ def get_default_gdb_path() -> Path:
 def get_default_era5_cache_dir() -> Path:
   """Returns the local runtime staging directory for continental ERA5 climate index files.
 
-  The authoritative data store is strictly gs://open-multimet/ancillary-data/hydroatlas/era5_climate/.
+  The data store is gs://open-multimet/ancillary-data/hydroatlas/era5_climate/.
   This local directory serves strictly as a temporary runtime staging cache.
   """
   target = Path.home() / ".cache" / "googlehydrology" / "era5_climate"

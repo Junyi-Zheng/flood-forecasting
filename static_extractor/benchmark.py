@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Automated global benchmarking suite for Caravan static attribute extraction against published canonical data."""
+"""Automated global benchmarking suite for Caravan static attribute extraction against published reference data."""
 
 from __future__ import annotations
 
@@ -787,7 +787,7 @@ def _generate_markdown_report(
   lines = [
       "# Caravan Static Attributes Extractor: Global Benchmark Report",
       "",
-      "> **Authoritative Validation Benchmark** against canonical published Caravan datasets",
+      "> **Validation Benchmark** against published Caravan datasets",
       "> covering 196 HydroATLAS v1.0 Level 12 physiographic/hydro-environmental attributes and 14 ERA5 climate metrics.",
       "",
       "## 1. Executive Summary",

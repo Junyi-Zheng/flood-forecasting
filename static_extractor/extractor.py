@@ -17,11 +17,11 @@
 Interfaces with global BasinATLAS (HydroATLAS v1.0 Level 12) local geodatabase
 or shapefile to compute exact area-weighted physiographic, hydro-environmental,
 soil, land-cover, climatology, and anthropogenic attributes for arbitrary user-uploaded
-or delineated watershed polygons following the official Caravan aggregation methodology:
+or delineated watershed polygons following the Caravan aggregation methodology:
 - Area-weighted majority voting for discrete categorical classes
 - Downstream topological outlet tracing via NEXT_DOWN for pour-point metrics
 - Area-weighted averaging for continuous physiographic & hydro-climatic properties
-- Canonical 40-year ERA5 climate indices (1981-2020)
+- 40-year ERA5 climate indices (1981-2020)
 """
 
 from __future__ import annotations
@@ -183,7 +183,7 @@ class StaticAttributesExtractor:
   ):
     """Initializes the StaticAttributesExtractor.
 
-    Authoritative data sources are strictly:
+    Data sources are:
       - HydroATLAS: gs://open-multimet/ancillary-data/hydroatlas/BasinATLAS_v10.gdb/
       - ERA5 Climate (hybas): gs://open-multimet/ancillary-data/hydroatlas/era5_climate/
       - ERA5 Gridded (gridded): gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr
@@ -541,7 +541,7 @@ class StaticAttributesExtractor:
     # 7. Drainage Area & Aggregation Fraction
     total_frag_area = float(sum(basin_data["area_fragments"]))
     caravan_attributes["area"] = total_frag_area
-    caravan_attributes["basin_area"] = total_frag_area  # Canonical Caravan attribute name
+    caravan_attributes["basin_area"] = total_frag_area  # Caravan attribute name
     caravan_attributes["area_fraction_used_for_aggregation"] = (
         float(sum(masked_weights) / total_frag_area)
         if total_frag_area > 0

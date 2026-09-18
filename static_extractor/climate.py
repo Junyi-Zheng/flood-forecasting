@@ -184,7 +184,7 @@ def compute_caravan_climate_metrics(
     pet_era5: pd.Series,
     pet_fao: Optional[pd.Series] = None,
 ) -> Dict[str, float]:
-  """Computes all canonical Caravan climate indices.
+  """Computes the Caravan climate indices.
 
   According to Addor et al. (2017) and Knoben et al. (2018).
 
@@ -314,7 +314,7 @@ class ERA5ClimateLoader:
     self.records: Dict[int, Dict[str, Any]] = {}
 
   def _download_from_gcs(self, continent_code: str, target_file: Path) -> bool:
-    """Attempts to download continent file from canonical GCS bucket."""
+    """Attempts to download continent file from the GCS bucket."""
     gcs_src = f"{GCS_ERA5_CLIMATE_URI}/{continent_code}_climate_indices.txt"
     try:
       import gcsfs
@@ -348,7 +348,7 @@ class ERA5ClimateLoader:
       return True
 
     logger.info(
-        "Downloading ERA5 climate indices for '%s' from canonical store %s...",
+        "Downloading ERA5 climate indices for '%s' from %s...",
         continent_code,
         GCS_ERA5_CLIMATE_URI,
     )
@@ -356,7 +356,7 @@ class ERA5ClimateLoader:
       return True
 
     raise FileNotFoundError(
-        f"Could not download {continent_code}_climate_indices.txt from canonical GCS store "
+        f"Could not download {continent_code}_climate_indices.txt from GCS store "
         f"{GCS_ERA5_CLIMATE_URI} to runtime staging cache {txt_path}."
     )
 

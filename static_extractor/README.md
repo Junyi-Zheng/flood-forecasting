@@ -1,6 +1,6 @@
 # Caravan Static Attributes Extractor
 
-The `static_extractor` package is the official, open-source static attribute extraction engine for Caravan within [OpenHydroNet](https://github.com/google-research/flood-forecasting). It calculates the full **197+ Caravan physiographic, hydro-climatic, soil, land-cover, and anthropogenic attributes** for arbitrary user-supplied watershed polygons (GeoJSON, Shapefile, GeoPackage) matching the exact Caravan methodology.
+The `static_extractor` package computes Caravan static attributes for user-supplied watershed polygons (GeoJSON, Shapefile, GeoPackage), following the published Caravan methodology. It covers the physiographic, hydro-climatic, soil, land-cover and anthropogenic attributes.
 
 ---
 
@@ -25,12 +25,12 @@ The `static_extractor` package is the official, open-source static attribute ext
 
 ---
 
-## 🗄️ Canonical Data Sourcing & Paths
+## 🗄️ Data Sourcing & Paths
 
-The extractor enforces a **single, authoritative source of truth** hosted on Google Cloud Storage. No local data copies are required prior to runtime.
+The extractor reads its input data from Google Cloud Storage. No local data copies are required prior to runtime.
 
-### 1. Authoritative GCS Data Stores
-| Dataset | Canonical GCS URI | Description |
+### 1. GCS Data Stores
+| Dataset | GCS URI | Description |
 | :--- | :--- | :--- |
 | **HydroATLAS Geodatabase** | `gs://open-multimet/ancillary-data/hydroatlas/BasinATLAS_v10.gdb/` | Full global ESRI FileGDB containing the `BasinATLAS_v10_lev12` layer (5.5 GiB, 1,034,083 Level 12 subcatchments). |
 | **ERA5-Land Climate Tables** | `gs://open-multimet/ancillary-data/hydroatlas/era5_climate/` | 9 continental precomputed Level 12 climate tables (`af`, `ar`, `as`, `au`, `eu`, `gr`, `na`, `sa`, `si`; 1,034,027 basins). |
@@ -106,7 +106,7 @@ extract-caravan-static \
 
 ## 🚀 Multi-Dataset Static Batch Runner (`extract-caravan-static-batch`)
 
-For batch processing static attributes across multiple Caravan datasets in one command, the package provides `extract-caravan-static-batch` (alias `extract-static-attributes-batch`). It specifically extracts the static HydroATLAS physiographic attributes and ERA5 climate indices. It accepts parent directories, directory lists, or direct GCS URIs, auto-discovers watershed shapefiles, supports `--workers` parallelization, and outputs partitioned files matching the canonical `caravan-new` schema (`attributes_hydroatlas_<ds>.csv`, `attributes_caravan_<ds>.csv`, `attributes_<ds>.parquet`):
+For batch processing static attributes across multiple Caravan datasets in one command, the package provides `extract-caravan-static-batch` (alias `extract-static-attributes-batch`). It specifically extracts the static HydroATLAS physiographic attributes and ERA5 climate indices. It accepts parent directories, directory lists, or direct GCS URIs, auto-discovers watershed shapefiles, supports `--workers` parallelization, and outputs partitioned files matching the `caravan-new` schema (`attributes_hydroatlas_<ds>.csv`, `attributes_caravan_<ds>.csv`, `attributes_<ds>.parquet`):
 
 ```bash
 # 1. Run all datasets within a parent directory (e.g. caravan/ containing camels/, hysets/, etc.)
@@ -135,7 +135,7 @@ extract-caravan-static-batch \
 - `--input-dirs`, `-d`: Explicit list of dataset directories.
 - `--input-files`, `-f`: Explicit list of vector files (`.shp`, `.geojson`, `.gpkg`).
 - `--output-dir`, `-o`: Output directory for generated files.
-- `--preserve-caravan-dirs`: Automatically routes and partitions static attributes by Caravan collection and subdataset into `<collection>/attributes/<subdataset>/` matching the canonical storage contract.
+- `--preserve-caravan-dirs`: Automatically routes and partitions static attributes by Caravan collection and subdataset into `<collection>/attributes/<subdataset>/` matching the storage layout.
 - `--partition-outputs`, `-P`: Explicitly enable partitioned subdataset outputs (`attributes_hydroatlas_<ds>.csv`, `attributes_caravan_<ds>.csv`, `attributes_<ds>.parquet`).
 - `--workers`, `-w`: Number of parallel worker processes.
 - `--era5-source`: `hybas` (default) or `gridded`.
@@ -237,7 +237,7 @@ pytest test/test_static_extractor.py -v
 
 ## 📊 Global Benchmarking Suite
 
-The package includes an automated benchmarking suite (`static_extractor.benchmark`) that validates extracted attributes against published canonical Caravan reference data across **490 diverse basins globally** (7 datasets × 5 size tiers: micro, small, medium, large, macro).
+The package includes an automated benchmarking suite (`static_extractor.benchmark`) that validates extracted attributes against published Caravan reference data across **490 diverse basins globally** (7 datasets × 5 size tiers: micro, small, medium, large, macro).
 
 ### Running the Benchmark
 

@@ -78,7 +78,7 @@ def parse_args(args=None):
       "--auto-download",
       action="store_true",
       default=True,
-      help="Automatically download data from canonical Google Cloud Storage if not staged locally.",
+      help="Automatically download data from Google Cloud Storage if not staged locally.",
   )
   parser.add_argument(
       "--era5-source",

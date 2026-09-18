@@ -739,7 +739,7 @@ def run_batch_extraction(
 
   if target_gcs_uri:
     logger.debug(
-        "All extracted datasets uploaded to canonical GCS destination: %s",
+        "All extracted datasets uploaded to GCS destination: %s",
         target_gcs_uri,
     )
 
@@ -754,7 +754,7 @@ def run_batch_extraction(
       else:
         print(f"✓ Combined CSV generated: {combined_path.name} ({len(combined_df):,} total rows)")
     if target_gcs_uri:
-      print(f"✓ Results stored in canonical GCS destination: {target_gcs_uri}")
+      print(f"✓ Results stored in GCS destination: {target_gcs_uri}")
     else:
       print(f"✓ Results stored locally at: {out_dir}")
 
@@ -805,7 +805,7 @@ def parse_args(args=None):
   parser.add_argument(
       "--preserve-caravan-dirs",
       action="store_true",
-      help="Partition static attributes by Caravan collection and subdataset into <collection>/attributes/<subdataset>/ per the canonical storage contract.",
+      help="Partition static attributes by Caravan collection and subdataset into <collection>/attributes/<subdataset>/ per the storage layout.",
   )
   parser.add_argument(
       "--gcs-output-uri",

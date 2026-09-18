@@ -10,7 +10,7 @@ This repository is a fork of [NeuralHydrology](https://github.com/neuralhydrolog
 
 ## 📖 Documentation
 
-Detailed instructions on how to configure, train, and evaluate OpenHydroNet models can be found on our official documentation page:
+Detailed instructions on how to configure, train, and evaluate OpenHydroNet models can be found on our documentation page:
 👉 **[openhydronet.readthedocs.io](https://openhydronet.readthedocs.io/)**
 
 Watch our high-level video introduction to the interactive tutorial on YouTube:
@@ -150,12 +150,12 @@ The `~/flood-forecasting/example-configs` directory contains reference YAML file
 
 ## **Caravan Static Attributes Extractor**
 
-This repository includes the official Caravan static attribute extraction engine (`static_extractor`), designed to compute the full **197+ Caravan physiographic, hydro-climatic, soil, land-cover, and anthropogenic attributes** for arbitrary user-supplied watershed polygons (GeoJSON, Shapefile, GeoPackage) matching the exact Caravan methodology.
+This repository includes a Caravan static attribute extraction engine (`static_extractor`), which computes Caravan physiographic, hydro-climatic, soil, land-cover and anthropogenic attributes for user-supplied watershed polygons (GeoJSON, Shapefile, GeoPackage), following the published Caravan methodology.
 
 👉 **Full Documentation, Methodology, and API Reference:** See the [Caravan Static Attributes Extractor Documentation](static_extractor/README.md).
 
 ### **Quick Highlights**
-- **Canonical Data Stores:** Hosted in Google Cloud Storage at [`gs://open-multimet/ancillary-data/hydroatlas/`](gs://open-multimet/ancillary-data/hydroatlas/) and [`gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr`](gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr). Automatically staged locally on demand.
+- **Data Stores:** Hosted in Google Cloud Storage at [`gs://open-multimet/ancillary-data/hydroatlas/`](gs://open-multimet/ancillary-data/hydroatlas/) and [`gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr`](gs://open-multimet/gridded-data-archives/ERA5_LAND/daily_surface.zarr). Automatically staged locally on demand.
 - **Strict Caravan Spatial Aggregation:** Area-weighted averaging for continuous attributes, area-weighted majority voting for discrete categorical classes, and downstream topological routing (`NEXT_DOWN`) for pour-point properties.
 - **Global 40-Year ERA5-Land Climate Metrics (1981–2020):** FAO-56 Penman-Monteith PET, aridity index, snow fraction, Knoben annual moisture and seasonality indices, and Addor extreme precipitation metrics.
 - **Dual Climate Calculation Modes:** Support for ultra-fast precalculated HydroSHEDS Level 12 sub-basin aggregation (`--era5-source hybas`, default, ~20 ms/basin) or recalculating directly on the fly from archived gridded ERA5 daily surface Zarr (`--era5-source gridded`).
@@ -168,7 +168,7 @@ extract-caravan-static \
     --input /path/to/watershed_polygons.geojson \
     --output /path/to/extracted_caravan_attributes.csv
 
-# Multi-dataset batch runner across all collections into canonical caravan-new layout
+# Multi-dataset batch runner across all collections into the caravan-new layout
 extract-caravan-static-batch \
     --parent-dir gs://open-multimet/caravan-new/ \
     --output-dir gs://open-multimet/caravan-new/ \
