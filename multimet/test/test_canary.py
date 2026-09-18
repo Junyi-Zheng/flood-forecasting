@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import datetime
 import urllib.request
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -118,7 +119,9 @@ class TestNoaaPslCpc:
         f"file this small as a truncated download and retry forever."
     )
 
-  def test_yearly_netcdf_still_matches_expected_layout(self, tmp_path) -> None:
+  def test_yearly_netcdf_still_matches_expected_layout(
+      self, tmp_path: Path
+  ) -> None:
     """A real PSL file still parses onto the MultiMet grid with live values."""
     year = datetime.date.today().year - 1
     path = cpc_module.ensure_psl_cpc_netcdf(year, cache_dir=str(tmp_path))

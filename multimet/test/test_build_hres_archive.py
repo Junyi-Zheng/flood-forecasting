@@ -23,8 +23,8 @@ command line surface. Full builds live in
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -50,8 +50,9 @@ pytestmark = pytest.mark.unit
 
 
 def make_batch(
-    dates: List[str], value_for=lambda i, var: float(i)
-) -> tuple[List[pd.Timestamp], Dict[str, List[np.ndarray]]]:
+    dates: list[str],
+    value_for: Callable[[int, str], float] = lambda i, var: float(i),
+) -> tuple[list[pd.Timestamp], dict[str, list[np.ndarray]]]:
   """Builds ``(batch_dates, batch_data)`` inputs for ``build_batch_dataset``."""
   timestamps = [pd.Timestamp(d) for d in dates]
   shape = (NUM_LEAD_DAYS, len(FAKE_HRES_LATS), len(FAKE_HRES_LONS))
@@ -65,7 +66,10 @@ def make_batch(
   return timestamps, batch_data
 
 
-def make_batch_dataset(dates: List[str], value_for=lambda i, var: float(i)) -> xr.Dataset:
+def make_batch_dataset(
+    dates: list[str],
+    value_for: Callable[[int, str], float] = lambda i, var: float(i),
+) -> xr.Dataset:
   """Convenience wrapper returning a ready-to-write batch dataset."""
   timestamps, batch_data = make_batch(dates, value_for)
   return build_batch_dataset(
@@ -403,9 +407,9 @@ class TestSourceDispatch:
   """
 
   @staticmethod
-  def _install(monkeypatch: pytest.MonkeyPatch) -> Dict[str, List[pd.Timestamp]]:
+  def _install(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[pd.Timestamp]]:
     """Installs a recording stub for each source and returns the call log."""
-    calls: Dict[str, List[pd.Timestamp]] = {"wb2": [], "open": []}
+    calls: dict[str, list[pd.Timestamp]] = {"wb2": [], "open": []}
     shape = (NUM_LEAD_DAYS, len(FAKE_HRES_LATS), len(FAKE_HRES_LONS))
 
     class Recorder:
@@ -415,7 +419,7 @@ class TestSourceDispatch:
 
       def extract_date(
           self, date: pd.Timestamp, *args: object, **kwargs: object
-      ) -> Dict[str, np.ndarray]:
+      ) -> dict[str, np.ndarray]:
         calls[self.key].append(date)
         return {
             var: np.full(shape, 1.0, dtype=np.float32) for var in HRES_VARIABLES

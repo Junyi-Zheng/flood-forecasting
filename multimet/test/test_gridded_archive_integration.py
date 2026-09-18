@@ -23,8 +23,8 @@ contact NOAA PSL, WeatherBench 2, ECMWF, or GCS.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -33,11 +33,15 @@ import xarray as xr
 
 from multimet.build_cpc_archive import CPC_VARIABLE, build_cpc_archive
 from multimet.build_hres_archive import (
-    HRES_VARIABLES,
-    NUM_LEAD_DAYS,
-    build_hres_archive,
+  HRES_VARIABLES,
+  NUM_LEAD_DAYS,
+  build_hres_archive,
 )
-from multimet.test.conftest import FAKE_HRES_LATS, FAKE_HRES_LONS, FakeHRESSource
+from multimet.test.conftest import (
+  FAKE_HRES_LATS,
+  FAKE_HRES_LONS,
+  FakeHRESSource,
+)
 
 pytestmark = pytest.mark.integration
 

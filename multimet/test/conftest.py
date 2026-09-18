@@ -25,8 +25,8 @@ services. Those tests are skipped unless ``--run-canary`` is passed; see
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -52,7 +52,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_collection_modifyitems(
-    config: pytest.Config, items: List[pytest.Item]
+    config: pytest.Config, items: list[pytest.Item]
 ) -> None:
   """Skips canary tests unless they were explicitly requested.
 
@@ -181,7 +181,7 @@ class FakeHRESSource:
 
   def __init__(
       self,
-      available: Optional[Iterable[str]] = None,
+      available: Iterable[str] | None = None,
       offset: float = 0.0,
       latitudes: np.ndarray = FAKE_HRES_LATS,
       longitudes: np.ndarray = FAKE_HRES_LONS,
@@ -190,7 +190,7 @@ class FakeHRESSource:
     self.offset = offset
     self.latitudes = latitudes
     self.longitudes = longitudes
-    self.requested: List[str] = []
+    self.requested: list[str] = []
 
   def value_for(self, date: pd.Timestamp, variable: str) -> float:
     """Deterministic value written for a given date/variable pair."""
@@ -201,9 +201,9 @@ class FakeHRESSource:
   def extract_date(
       self,
       date: pd.Timestamp,
-      target_lat: Optional[np.ndarray] = None,
-      target_lon: Optional[np.ndarray] = None,
-  ) -> Optional[Dict[str, np.ndarray]]:
+      target_lat: np.ndarray | None = None,
+      target_lon: np.ndarray | None = None,
+  ) -> dict[str, np.ndarray] | None:
     """Mirrors the ``extract_date`` contract of the real source classes."""
     del target_lat, target_lon  # Fakes always emit the canonical fake grid.
     key = pd.Timestamp(date).strftime("%Y-%m-%d")
@@ -232,7 +232,7 @@ def fake_hres_source(monkeypatch: pytest.MonkeyPatch) -> Callable[..., FakeHRESS
   """
 
   def _install(
-      available: Optional[Iterable[str]] = None,
+      available: Iterable[str] | None = None,
       offset: float = 0.0,
   ) -> FakeHRESSource:
     source = FakeHRESSource(available=available, offset=offset)

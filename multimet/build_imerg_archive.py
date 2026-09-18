@@ -51,8 +51,8 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
 import urllib.parse
+from collections.abc import Sequence
 
 import fsspec
 
@@ -103,7 +103,7 @@ def query_cmr_granules(
     version: str = "07",
     cmr_url: str = DEFAULT_CMR_GRANULES_URL,
     timeout: int = 30,
-) -> List[str]:
+) -> list[str]:
   """Queries NASA's Common Metadata Repository (CMR) for IMERG granule URLs on ``date``."""
   dt = pd.Timestamp(date)
   start_iso = dt.strftime("%Y-%m-%dT00:00:00Z")
@@ -117,7 +117,7 @@ def query_cmr_granules(
   resp = requests.get(cmr_url, params=params, timeout=timeout)
   resp.raise_for_status()
   entries = resp.json().get("feed", {}).get("entry", [])
-  urls: List[str] = []
+  urls: list[str] = []
   for entry in entries:
     for link in entry.get("links", []):
       href = link.get("href", "")
@@ -151,8 +151,8 @@ _netcdf_lock = threading.Lock()
 
 
 def get_earthdata_credentials_from_netrc(
-    netrc_path: Optional[str] = None,
-) -> Tuple[Optional[str], Optional[str]]:
+    netrc_path: str | None = None,
+) -> tuple[str | None, str | None]:
   """Reads NASA Earthdata credentials from ``~/.netrc`` if present."""
   path = netrc_path or os.path.expanduser("~/.netrc")
   if not os.path.exists(path):
@@ -175,10 +175,10 @@ class EarthdataSession(requests.Session):
 
   def __init__(
       self,
-      username: Optional[str] = None,
-      password: Optional[str] = None,
-      token: Optional[str] = None,
-      netrc_path: Optional[str] = None,
+      username: str | None = None,
+      password: str | None = None,
+      token: str | None = None,
+      netrc_path: str | None = None,
   ):
     super().__init__()
     token = token or os.environ.get("EARTHDATA_TOKEN")
@@ -199,7 +199,11 @@ class EarthdataSession(requests.Session):
     elif username and password:
       self.auth = (username, password)
 
-  def rebuild_auth(self, prepared_request, response) -> None:
+  def rebuild_auth(
+      self,
+      prepared_request: requests.PreparedRequest,
+      response: requests.Response,
+  ) -> None:
     """Preserves Authorization header across redirects to/from NASA URS."""
     headers = prepared_request.headers
     url = prepared_request.url
@@ -228,7 +232,7 @@ class EarthdataSession(requests.Session):
 def download_daily_imerg(
     url: str,
     dest_path: str,
-    session: Optional[requests.Session] = None,
+    session: requests.Session | None = None,
     max_retries: int = 8,
 ) -> str:
   """Downloads a daily IMERG NetCDF4 file from NASA GES DISC with retries."""
@@ -241,7 +245,7 @@ def download_daily_imerg(
   os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
   temp_path = f"{dest_path}.tmp.{os.getpid()}.{time.time_ns()}"
 
-  last_err: Optional[Exception] = None
+  last_err: Exception | None = None
   for attempt in range(max_retries):
     try:
       if attempt == 0:
@@ -318,7 +322,7 @@ def parse_imerg_netcdf_to_grid(nc_path: str) -> np.ndarray:
       return vals
 
 
-def _read_and_parse_h5_granule(fpath: str) -> Optional[np.ndarray]:
+def _read_and_parse_h5_granule(fpath: str) -> np.ndarray | None:
   """Reads a single half-hourly IMERG HDF5 granule into a (1800, 3600) array."""
   try:
     with open(fpath, "rb") as f:
@@ -350,11 +354,11 @@ class GESDISCImergSource:
   def __init__(
       self,
       base_url: str = DEFAULT_GESDISC_URL,
-      username: Optional[str] = None,
-      password: Optional[str] = None,
-      token: Optional[str] = None,
-      netrc_path: Optional[str] = None,
-      cache_dir: Optional[str] = None,
+      username: str | None = None,
+      password: str | None = None,
+      token: str | None = None,
+      netrc_path: str | None = None,
+      cache_dir: str | None = None,
       cleanup_cache: bool = False,
   ):
     self.base_url = base_url.rstrip("/")
@@ -380,7 +384,7 @@ class GESDISCImergSource:
       )
     return self._thread_local.session
 
-  def extract_date(self, date: pd.Timestamp) -> Optional[np.ndarray]:
+  def extract_date(self, date: pd.Timestamp) -> np.ndarray | None:
     """Downloads daily NetCDF-4 granule and returns (1800, 3600) array in mm."""
     date = pd.to_datetime(date)
     date_str = date.strftime("%Y%m%d")
@@ -448,7 +452,7 @@ class LocalImergSource:
     self.local_dir = local_dir
     self.granule_workers = max(1, granule_workers)
 
-  def extract_date(self, date: pd.Timestamp) -> Optional[np.ndarray]:
+  def extract_date(self, date: pd.Timestamp) -> np.ndarray | None:
     date = pd.to_datetime(date)
     date_str = date.strftime("%Y%m%d")
     month_str = date.strftime("%Y%m")
@@ -468,7 +472,7 @@ class LocalImergSource:
 
     # 2. Check for 48 half-hourly HDF5 granules in local_dir or local_dir/{YYYYMM}
     search_dirs = [self.local_dir, os.path.join(self.local_dir, month_str)]
-    h5_files: List[str] = []
+    h5_files: list[str] = []
     for dpath in search_dirs:
       if os.path.isdir(dpath):
         for fname in os.listdir(dpath):
@@ -510,8 +514,8 @@ class LocalImergSource:
 def build_batch_dataset(
     batch_dates: Sequence[pd.Timestamp],
     batch_grids: Sequence[np.ndarray],
-    latitudes: Optional[np.ndarray] = None,
-    longitudes: Optional[np.ndarray] = None,
+    latitudes: np.ndarray | None = None,
+    longitudes: np.ndarray | None = None,
 ) -> xr.Dataset:
   """Assembles a batch of daily IMERG grids into the canonical Zarr schema."""
   lats = IMERG_LATS if latitudes is None else latitudes
@@ -598,7 +602,7 @@ def write_batch_in_place(
     ds_batch: xr.Dataset,
     target_zarr_url: str,
     project: str = DEFAULT_PROJECT,
-    date_to_idx: Optional[Dict[str, int]] = None,
+    date_to_idx: dict[str, int] | None = None,
     max_retries: int = 5,
 ) -> None:
   """Writes a batch of dates directly in-place into existing Zarr array slices."""
@@ -664,7 +668,7 @@ def write_batch_in_place(
 
 def build_imerg_archive(
     start_date: str = DEFAULT_START_DATE,
-    end_date: Optional[str] = None,
+    end_date: str | None = None,
     source_type: str = "auto",
     target_zarr: str = DEFAULT_TARGET_ZARR,
     project: str = DEFAULT_PROJECT,
@@ -675,11 +679,11 @@ def build_imerg_archive(
     cleanup_cache: bool = False,
     overwrite: bool = False,
     in_place: bool = False,
-    local_dir: Optional[str] = None,
-    earthdata_username: Optional[str] = None,
-    earthdata_password: Optional[str] = None,
-    earthdata_token: Optional[str] = None,
-    netrc_path: Optional[str] = None,
+    local_dir: str | None = None,
+    earthdata_username: str | None = None,
+    earthdata_password: str | None = None,
+    earthdata_token: str | None = None,
+    netrc_path: str | None = None,
 ) -> None:
   """Builds or updates the unified IMERG daily native resolution Zarr archive."""
   logging.basicConfig(

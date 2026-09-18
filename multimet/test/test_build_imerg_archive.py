@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 import h5py
 import numpy as np
 import pandas as pd
@@ -25,18 +26,18 @@ import xarray as xr
 
 from multimet import build_imerg_archive as imerg_module
 from multimet.build_imerg_archive import (
-    DEFAULT_START_DATE,
-    GESDISCImergSource,
-    IMERG_ATTRS,
-    IMERG_VARIABLE,
-    LAT_COUNT,
-    LON_COUNT,
-    LocalImergSource,
-    build_arg_parser,
-    build_batch_dataset,
-    build_imerg_archive,
-    parse_imerg_netcdf_to_grid,
-    write_batch_in_place,
+  DEFAULT_START_DATE,
+  IMERG_ATTRS,
+  IMERG_VARIABLE,
+  LAT_COUNT,
+  LON_COUNT,
+  GESDISCImergSource,
+  LocalImergSource,
+  build_arg_parser,
+  build_batch_dataset,
+  build_imerg_archive,
+  parse_imerg_netcdf_to_grid,
+  write_batch_in_place,
 )
 
 pytestmark = pytest.mark.unit

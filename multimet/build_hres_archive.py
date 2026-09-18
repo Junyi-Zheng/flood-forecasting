@@ -45,9 +45,10 @@ import datetime
 import logging
 import os
 import sys
-from typing import Dict, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 import fsspec
+
 try:
   import gcsfs
 except ImportError:
@@ -146,7 +147,7 @@ class WeatherBench2Source:
     self.latitudes = self.ds["latitude"].values.astype(np.float32)
     self.longitudes = self.ds["longitude"].values.astype(np.float32)
 
-  def extract_date(self, date: pd.Timestamp) -> Optional[Dict[str, np.ndarray]]:
+  def extract_date(self, date: pd.Timestamp) -> dict[str, np.ndarray] | None:
     """Extracts 10 lead days for a single forecast date."""
     target_time = np.datetime64(date.strftime("%Y-%m-%dT00:00:00"))
     if target_time not in self.ds["time"].values:
@@ -204,11 +205,12 @@ class ECMWFOpenDataSource:
 
   def extract_date(
       self, date: pd.Timestamp, target_lat: np.ndarray, target_lon: np.ndarray
-  ) -> Optional[Dict[str, np.ndarray]]:
+  ) -> dict[str, np.ndarray] | None:
     if self.fs is None:
       return None
 
     import json
+
     import eccodes
     from scipy.ndimage import zoom
 
@@ -246,7 +248,7 @@ class ECMWFOpenDataSource:
               offsets[param] = (msg["_offset"], msg["_length"])
 
         with self.fs.open(grib_path, "rb") as f:
-          for param in raw_steps:
+          for param, param_steps in raw_steps.items():
             if param in offsets:
               off, length = offsets[param]
               f.seek(off)
@@ -258,11 +260,11 @@ class ECMWFOpenDataSource:
               if is_0p4:
                 grid_0p4 = vals.reshape(451, 900)
                 grid_0p25 = zoom(grid_0p4, (721 / 451, 1440 / 900), order=1).astype(np.float32)
-                raw_steps[param].append(grid_0p25)
+                param_steps.append(grid_0p25)
               else:
-                raw_steps[param].append(vals.reshape(721, 1440).astype(np.float32))
+                param_steps.append(vals.reshape(721, 1440).astype(np.float32))
             else:
-              raw_steps[param].append(np.full((len(target_lat), len(target_lon)), np.nan, dtype=np.float32))
+              param_steps.append(np.full((len(target_lat), len(target_lon)), np.nan, dtype=np.float32))
 
       return {
           "temperature_2m": np.stack(raw_steps["2t"], axis=0),
@@ -284,10 +286,10 @@ class ECMWFOpenDataSource:
       return None
 
 
-_worker_wb2: Optional[WeatherBench2Source] = None
-_worker_open_data: Optional[ECMWFOpenDataSource] = None
-_target_lat: Optional[np.ndarray] = None
-_target_lon: Optional[np.ndarray] = None
+_worker_wb2: WeatherBench2Source | None = None
+_worker_open_data: ECMWFOpenDataSource | None = None
+_target_lat: np.ndarray | None = None
+_target_lon: np.ndarray | None = None
 
 
 def _init_worker(project: str) -> None:
@@ -301,7 +303,7 @@ def _init_worker(project: str) -> None:
 
 def _extract_single_date(
     dt: pd.Timestamp,
-) -> Tuple[pd.Timestamp, Dict[str, np.ndarray]]:
+) -> tuple[pd.Timestamp, dict[str, np.ndarray]]:
   global _worker_wb2, _worker_open_data, _target_lat, _target_lon
   date_data = None
   for extract_attempt in range(3):
@@ -346,7 +348,7 @@ def _extract_single_date(
 
 def build_batch_dataset(
     batch_dates: Sequence[pd.Timestamp],
-    batch_data: Dict[str, Sequence[np.ndarray]],
+    batch_data: dict[str, Sequence[np.ndarray]],
     latitudes: np.ndarray,
     longitudes: np.ndarray,
 ) -> xr.Dataset:
@@ -442,7 +444,7 @@ def write_batch_in_place(
     ds_batch: xr.Dataset,
     target_zarr_url: str,
     project: str = DEFAULT_PROJECT,
-    date_to_idx: Optional[Dict[str, int]] = None,
+    date_to_idx: dict[str, int] | None = None,
     max_retries: int = 5,
 ) -> None:
   """Writes a batch of dates directly in-place into existing Zarr array slices."""
@@ -514,7 +516,7 @@ def build_hres_archive(
     batch_size: int = 10,
     overwrite: bool = False,
     in_place: bool = False,
-    num_workers: Optional[int] = None,
+    num_workers: int | None = None,
 ) -> None:
   """Main entry point to execute the HRES archive build."""
   logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -657,8 +659,8 @@ def build_hres_archive(
           iterator, total=len(dates), desc=f"Processing HRES ({num_workers} workers)"
       ):
         batch_dates.append(dt)
-        for k in batch_data:
-          batch_data[k].append(date_data[k])
+        for k, k_list in batch_data.items():
+          k_list.append(date_data[k])
         if len(batch_dates) >= batch_size:
           flush_batch()
   else:
@@ -669,8 +671,8 @@ def build_hres_archive(
     for dt in tqdm.tqdm(dates, desc="Processing HRES (sequential)"):
       dt, date_data = _extract_single_date(dt)
       batch_dates.append(dt)
-      for k in batch_data:
-        batch_data[k].append(date_data[k])
+      for k, k_list in batch_data.items():
+        k_list.append(date_data[k])
       if len(batch_dates) >= batch_size:
         flush_batch()
 

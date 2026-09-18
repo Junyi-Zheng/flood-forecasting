@@ -39,10 +39,11 @@ import shutil
 import sys
 import tempfile
 import time
-from typing import Optional, Sequence, Tuple
 import urllib.request
+from collections.abc import Sequence
 
 import fsspec
+
 try:
   import gcsfs
 except ImportError:
@@ -138,8 +139,8 @@ def ensure_psl_cpc_netcdf(
 
 def process_cpc_netcdf_to_dataset(
     nc_path: str,
-    target_start_date: Optional[pd.Timestamp] = None,
-    target_end_date: Optional[pd.Timestamp] = None,
+    target_start_date: pd.Timestamp | None = None,
+    target_end_date: pd.Timestamp | None = None,
 ) -> xr.Dataset:
   """Reads a yearly NOAA PSL NetCDF file and standardizes it to Caravan MultiMet schema.
 
@@ -304,18 +305,18 @@ def write_batch_to_zarr(
 
 
 _worker_cache_dir: str = DEFAULT_CACHE_DIR
-_worker_start_date: Optional[pd.Timestamp] = None
-_worker_end_date: Optional[pd.Timestamp] = None
+_worker_start_date: pd.Timestamp | None = None
+_worker_end_date: pd.Timestamp | None = None
 _worker_cleanup_cache: bool = False
 _worker_year_starts: dict[int, pd.Timestamp] = {}
 
 
 def _init_cpc_worker(
     cache_dir: str,
-    start_date: Optional[pd.Timestamp],
-    end_date: Optional[pd.Timestamp],
+    start_date: pd.Timestamp | None,
+    end_date: pd.Timestamp | None,
     cleanup_cache: bool,
-    year_starts: Optional[dict[int, pd.Timestamp]] = None,
+    year_starts: dict[int, pd.Timestamp] | None = None,
 ) -> None:
   global _worker_cache_dir, _worker_start_date, _worker_end_date, _worker_cleanup_cache, _worker_year_starts
   _worker_cache_dir = cache_dir
@@ -325,7 +326,7 @@ def _init_cpc_worker(
   _worker_year_starts = year_starts or {}
 
 
-def _extract_single_year(year: int) -> Tuple[int, Optional[xr.Dataset]]:
+def _extract_single_year(year: int) -> tuple[int, xr.Dataset | None]:
   """Worker task to download and transform a single year of CPC precipitation."""
   global _worker_cache_dir, _worker_start_date, _worker_end_date, _worker_cleanup_cache, _worker_year_starts
   t0 = time.time()
@@ -368,14 +369,14 @@ def _extract_single_year(year: int) -> Tuple[int, Optional[xr.Dataset]]:
 def build_cpc_archive(
     start_year: int = DEFAULT_START_YEAR,
     end_year: int = DEFAULT_END_YEAR,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     target_zarr: str = DEFAULT_TARGET_ZARR,
     project: str = DEFAULT_PROJECT,
     cache_dir: str = DEFAULT_CACHE_DIR,
     cleanup_cache: bool = False,
     overwrite: bool = False,
-    num_workers: Optional[int] = None,
+    num_workers: int | None = None,
 ) -> None:
   """Main entry point to execute the NOAA CPC daily gridded archive build."""
   logging.basicConfig(

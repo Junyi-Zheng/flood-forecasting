@@ -22,8 +22,8 @@ command line surface. End-to-end builds live in
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -31,14 +31,14 @@ import pytest
 import xarray as xr
 
 from multimet.build_cpc_archive import (
-    CPC_LATS,
-    CPC_LONS,
-    CPC_VARIABLE,
-    DEFAULT_START_YEAR,
-    build_arg_parser,
-    ensure_psl_cpc_netcdf,
-    process_cpc_netcdf_to_dataset,
-    write_batch_to_zarr,
+  CPC_LATS,
+  CPC_LONS,
+  CPC_VARIABLE,
+  DEFAULT_START_YEAR,
+  build_arg_parser,
+  ensure_psl_cpc_netcdf,
+  process_cpc_netcdf_to_dataset,
+  write_batch_to_zarr,
 )
 from multimet.test.conftest import PSL_LATS, PSL_LONS
 
