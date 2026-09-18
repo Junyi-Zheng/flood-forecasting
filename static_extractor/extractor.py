@@ -209,7 +209,10 @@ class StaticAttributesExtractor:
     else:
       self.gdb_path = get_default_gdb_path()
 
-    if (not self.gdb_path.exists() or not any(self.gdb_path.iterdir())) and auto_download:
+    if auto_download and (
+        not self.gdb_path.exists()
+        or (self.gdb_path.is_dir() and not any(self.gdb_path.iterdir()))
+    ):
       logger.info(
           "BasinATLAS GDB not found in runtime cache %s. Automatically downloading from %s...",
           self.gdb_path,
