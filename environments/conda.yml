@@ -23,12 +23,12 @@ channels:  # Keep order
   - defaults
 dependencies:
   - python=3.12.*
-  - pytorch
+  - pytorch=2.5.*
   - pytorch-cuda
   - cuda-toolkit
   - cuda-version
-  - torchaudio
-  - torchvision
+  - torchaudio=2.5.*
+  - torchvision=0.20.*
   - absl-py
   - bokeh
   - cachey
