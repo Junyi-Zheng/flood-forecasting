@@ -44,6 +44,7 @@ import pytest
 
 from multimet import build_cpc_archive as cpc_module
 from multimet import build_hres_archive as hres_module
+from multimet import build_imerg_archive as imerg_module
 
 pytestmark = pytest.mark.canary
 
@@ -297,3 +298,27 @@ class TestEcmwfOpenDataDecoding:
     precipitation = extracted["total_precipitation"]
     finite = precipitation[np.isfinite(precipitation)]
     assert finite.min() >= 0.0, "de-accumulated precipitation went negative"
+
+
+class TestNasaCmrImerg:
+  """Canaries for the NASA Earthdata CMR IMERG V07 granule discovery feed."""
+
+  def test_half_hourly_cmr_returns_48_granules(self) -> None:
+    """NASA CMR still resolves all 48 half-hourly GPM_3IMERGHHE V07 granules."""
+    urls = imerg_module.query_cmr_granules(
+        imerg_module.IMERG_HHR_SHORT_NAME, pd.Timestamp("2024-06-01")
+    )
+    assert len(urls) == 48, (
+        f"Expected 48 half-hourly GPM_3IMERGHHE granules for 2024-06-01, got {len(urls)}"
+    )
+    assert all(url.endswith((".RT-H5", ".HDF5")) for url in urls)
+
+  def test_daily_cmr_returns_granule(self) -> None:
+    """NASA CMR still resolves the daily GPM_3IMERGDE V07 NetCDF-4 granule."""
+    urls = imerg_module.query_cmr_granules(
+        imerg_module.IMERG_DAILY_SHORT_NAME, pd.Timestamp("2024-06-01")
+    )
+    assert len(urls) == 1, (
+        f"Expected 1 daily GPM_3IMERGDE granule for 2024-06-01, got {len(urls)}"
+    )
+    assert urls[0].endswith(".nc4")

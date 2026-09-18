@@ -103,6 +103,7 @@ consuming MultiMet requires nothing beyond the GCS path above.
 | --- | --- | --- | --- |
 | `build-cpc-archive` | NOAA CPC Global Unified daily precipitation | 0.5° | 1979 → present |
 | `build-hres-archive` | ECMWF IFS HRES daily surface forecast, lead days 1–10 | 0.25° | 2016 → present |
+| `build-imerg-archive` | NASA GPM IMERG Early V07 daily precipitation | 0.1° | 2000 → present |
 
 See the [gridded archive builders guide](multimet/README.md) for source
 provenance, output schemas, and operational details (resume, overwrite, and
@@ -189,8 +190,8 @@ Where each one lives today:
   catchment delineation (IoU / Dice against reference polygons) and Caravan
   static attributes (correlation against published values).
 * **Canaries** — `multimet/test/test_canary.py`, covering NOAA PSL,
-  WeatherBench 2, and ECMWF Open Data. Skipped by default; opt in with
-  `--run-canary`. A nightly
+  WeatherBench 2, ECMWF Open Data, and NASA Earthdata CMR (IMERG). Skipped by
+  default; opt in with `--run-canary`. A nightly
   [`multimet canary`](.github/workflows/multimet-canary.yml) workflow runs them
   on a schedule and has no `pull_request` trigger by design.
 * **Audits** — one-off validations of a published Zarr store (contiguous time

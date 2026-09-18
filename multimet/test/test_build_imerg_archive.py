@@ -229,3 +229,36 @@ class TestCommandLine:
     assert args.cleanup_cache is False
     assert args.overwrite is False
     assert args.in_place is False
+
+  def test_query_cmr_granules_parses_data_links(
+      self, monkeypatch: pytest.MonkeyPatch
+  ) -> None:
+    class _FakeResp:
+      def raise_for_status(self) -> None:
+        pass
+
+      def json(self) -> dict:
+        return {
+            "feed": {
+                "entry": [
+                    {
+                        "links": [
+                            {
+                                "rel": "http://esipfed.org/ns/fedsearch/1.1/data#",
+                                "href": "https://gpm1.gesdisc.eosdis.nasa.gov/data/3B-DAY-E.V07B.nc4",
+                            },
+                            {
+                                "rel": "http://esipfed.org/ns/fedsearch/1.1/metadata#",
+                                "href": "https://gpm1.gesdisc.eosdis.nasa.gov/data/3B-DAY-E.V07B.nc4.xml",
+                            },
+                        ]
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(imerg_module.requests, "get", lambda *a, **k: _FakeResp())
+    urls = imerg_module.query_cmr_granules(
+        imerg_module.IMERG_DAILY_SHORT_NAME, pd.Timestamp("2024-06-01")
+    )
+    assert urls == ["https://gpm1.gesdisc.eosdis.nasa.gov/data/3B-DAY-E.V07B.nc4"]

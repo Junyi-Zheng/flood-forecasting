@@ -43,8 +43,8 @@ python -m multimet.build_imerg_archive --help
 
 ### Dependencies
 
-Everything needed for the CPC builder and for the WeatherBench 2 portion of the
-HRES builder is in `environments/environment_cpu.yml`.
+Everything needed for the CPC, HRES, and IMERG builders is included in
+`environments/conda.yml` and `environments/environment_cpu.yml`.
 
 Decoding the **ECMWF Open Data** GRIB2 archive (HRES from 2023-07-13 onward)
 additionally requires ecCodes, which is imported lazily so that the rest of the
@@ -53,6 +53,11 @@ package works without it:
 ```bash
 conda install -c conda-forge python-eccodes eccodes
 ```
+
+Fetching **NASA GPM IMERG** granules directly from NASA GES DISC requires
+NASA Earthdata Login credentials via `~/.netrc` or environment variables
+(`EARTHDATA_TOKEN`, or `EARTHDATA_USERNAME` and `EARTHDATA_PASSWORD`), unless
+reading from a pre-populated `--raw_dir` mirror.
 
 ---
 
@@ -99,18 +104,19 @@ Chunking:              (30, 360, 720)
 ### Usage
 
 ```bash
-# Full archive from scratch.
-build-cpc-archive --start_year 1979 --overwrite
+# Full archive from scratch, cleaning up temporary downloads afterward.
+build-cpc-archive --start_year 1979 --overwrite --cleanup_cache
 
 # Incremental update: resumes from the last date already in the store.
-build-cpc-archive
+build-cpc-archive --cleanup_cache
 
 # Bounded backfill into a local store, single process.
 build-cpc-archive \
   --start_year 2020 --end_year 2021 \
   --start_date 2020-06-01 --end_date 2021-05-31 \
-  --target_zarr /tmp/cpc_test.zarr \
-  --num_workers 1
+  --target_zarr ./cpc_test.zarr \
+  --num_workers 1 \
+  --cleanup_cache
 ```
 
 ---
@@ -119,14 +125,15 @@ build-cpc-archive \
 
 ### Sources
 
-ECMWF IFS HRES is not available from any single archive over the full period, so
-the builder stitches three sources together and presents them as one store:
+ECMWF IFS HRES is not available from any single public archive over the full
+period, so the builder stitches public sources together and presents them as one
+store with a contiguous daily time axis:
 
 | Date range | Source | Format |
 | --- | --- | --- |
-| 2016-01-01 → 2023-01-10 | WeatherBench 2 | public Zarr |
-| 2023-01-11 → 2023-07-12 | Google Flood Forecasting archive | NetCDF |
-| 2023-07-13 → present | ECMWF Open Data | GRIB2 |
+| 2016-01-01 → 2023-01-10 | WeatherBench 2 (`gs://weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr`) | public Zarr |
+| 2023-01-11 → 2023-07-12 | Initialized as `NaN` slices (can be backfilled in place with `--in_place`) | — |
+| 2023-07-13 → present | ECMWF Open Data (`gs://ecmwf-open-data`) | GRIB2 |
 
 Each date is routed to the source that owns it. If a date cannot be retrieved
 from any source, the builder writes an **all-NaN slice** rather than skipping
@@ -178,23 +185,81 @@ One chunk per forecast date keeps parallel writers lock-free.
 
 ```bash
 # Full archive from scratch.
-build-hres-archive --start_date 2016-01-01 --overwrite
+build-hres-archive --start_date 2016-01-01 --overwrite --cleanup_cache
 
 # Incremental update: resumes from the last date already in the store.
-build-hres-archive
+build-hres-archive --cleanup_cache
 
 # Repair: recompute a date range and overwrite it in place, leaving the
 # surrounding time axis untouched.
 build-hres-archive \
-  --start_date 2023-02-01 --end_date 2023-02-28 \
-  --in_place
+  --start_date 2023-08-01 --end_date 2023-08-31 \
+  --in_place \
+  --cleanup_cache
+```
+
+---
+
+## IMERG: `build_imerg_archive`
+
+### Sources
+
+NASA GPM IMERG Early Run V07 (`0.1°`, `1800 × 3600`) is built from the official
+NASA GES DISC Level 3 Daily product (`GPM_3IMERGDE.07`,
+`3B-DAY-E.MS.MRG.3IMERG.*.V07*.nc4`) or from pre-staged local NetCDF-4 /
+half-hourly HDF5 (`GPM_3IMERGHHE.07`, 48 `.RT-H5` granules/day) archives:
+
+| Source mode | Flag | Upstream format |
+| --- | --- | --- |
+| NASA GES DISC (default) | `--source gesdisc` | Daily NetCDF-4 (`3B-DAY-E.MS.MRG.3IMERG.{YYYYMMDD}-S000000-E235959.V07*.nc4`) |
+| Local directory | `--source local --local_dir ...` | Daily NetCDF-4 (`.nc4` / `.nc`) or 48 half-hourly HDF5 (`.RT-H5` / `.HDF5`) granules |
+
+### Transformations
+
+1. **Axis transposition (`(lon, lat)` → `(latitude, longitude)`).** Raw IMERG
+   NetCDF-4 and HDF5 granules store `precipitation` with `(lon, lat)` ordering
+   (`3600 × 1800`); the builder transposes every slice to `(latitude, longitude)`
+   (`1800 × 3600`) on an ascending `[-89.95, 89.95]` × `[-179.95, 179.95]` grid.
+2. **Half-hourly integration (local HDF5 mode).** Half-hourly `GPM_3IMERGHHE`
+   granules report precipitation rate in `mm/hr`. The builder integrates all 48
+   30-minute slots (`sum(P_t * 0.5 hr)`) to obtain daily accumulation in `mm/day`.
+3. **Missing values become NaN.** NASA's negative fill values (`-9999.9`) and any
+   non-finite cells are masked to `np.nan`.
+
+### Output schema
+
+```
+Dimensions:             (time, latitude, longitude)
+Coordinates:
+  * time                datetime64[ns]     daily, midnight UTC
+  * latitude            float32   1800     -89.95 .. 89.95  (ascending)
+  * longitude           float32   3600     -179.95 .. 179.95
+Data variables:
+    imerg_precipitation float32   (time, latitude, longitude)   mm/day
+Chunking:               (1, 1800, 3600)
+```
+
+### Usage
+
+```bash
+# Full archive from scratch, removing downloaded granules after each date.
+build-imerg-archive --start_date 2000-06-01 --overwrite --cleanup_cache
+
+# Incremental update: resumes from the last date already in the store.
+build-imerg-archive --cleanup_cache
+
+# Repair a date window in place without changing the time axis length.
+build-imerg-archive \
+  --start_date 2024-06-01 --end_date 2024-06-15 \
+  --in_place \
+  --cleanup_cache
 ```
 
 ---
 
 ## Operational behaviour
 
-Both builders share the same operational model.
+All three builders share the same operational model.
 
 ### Resume by default
 
@@ -209,11 +274,17 @@ builders safe to schedule as a recurring job.
 | --- | --- | --- |
 | Resume | *(default)* | Append only dates not already present. |
 | Overwrite | `--overwrite` | Delete the store and rebuild from scratch. |
-| In place | `--in_place` (HRES) | Rewrite dates that already exist, without changing the length of the time axis. |
+| In place | `--in_place` (HRES, IMERG) | Rewrite dates that already exist, without changing the length of the time axis. |
 
 `--in_place` is the repair path: use it when upstream reissues data for dates
 you have already ingested. It fails loudly if a requested date is not already in
 the store, so it can never silently corrupt the time index.
+
+### Cache cleanup
+
+Passing `--cleanup_cache` removes downloaded temporary files as each date/year
+completes and guarantees removal of the entire `--cache_dir` / `--local_cache`
+directory in a `try ... finally` block when the run exits.
 
 ### Target locations
 
@@ -239,16 +310,16 @@ error.
 
 ### Parallelism
 
-`--num_workers` controls a process pool. CPC parallelizes across years; HRES
-parallelizes across forecast dates. Workers only extract and transform — all
+`--num_workers` controls a process pool. CPC parallelizes across years; HRES and
+IMERG parallelize across dates. Workers only extract and transform — all
 Zarr writes happen serially in the parent process, so no locking is required.
 Set `--num_workers 1` for deterministic, easily debuggable runs.
 
 ### Batching and crash safety
 
-Extracted dates are accumulated into batches (`--batch_size` for HRES, one year
-at a time for CPC) and written together. Writes are retried with exponential
-backoff. If a run dies mid-build, the next run resumes from the last
+Extracted dates are accumulated into batches (`--batch_size` for HRES and IMERG,
+one year at a time for CPC) and written together. Writes are retried with
+exponential backoff. If a run dies mid-build, the next run resumes from the last
 successfully committed batch.
 
 > **Note.** A batch's data chunks and its time coordinate are written by the
@@ -264,7 +335,7 @@ successfully committed batch.
 
 The unit and integration suites are fully hermetic — they fabricate synthetic
 upstream data on the local filesystem and never contact NOAA PSL,
-WeatherBench 2, ECMWF, or GCS.
+WeatherBench 2, ECMWF, NASA GES DISC, or GCS.
 
 ```bash
 # Everything hermetic. Canaries are skipped automatically.
@@ -285,6 +356,7 @@ pytest multimet/test -m "not slow"
 | [`test_storage.py`](test/test_storage.py) | Zarr target classification: cloud URLs, POSIX paths, Windows paths, UNC shares |
 | [`test_build_cpc_archive.py`](test/test_build_cpc_archive.py) | Grid standardization, NaN masking, date filtering, Zarr write primitive, CLI |
 | [`test_build_hres_archive.py`](test/test_build_hres_archive.py) | Accumulation differencing, WB2 aggregation, batch schema, in-place writes, missing-data fallback, CLI |
+| [`test_build_imerg_archive.py`](test/test_build_imerg_archive.py) | NetCDF-4/HDF5 parsing, `(lon, lat)` transposition, 48-granule integration, resume, in-place writes, cache cleanup, CLI |
 | [`test_gridded_archive_integration.py`](test/test_gridded_archive_integration.py) | Full builds: resume, overwrite, in-place, gap handling, serial vs. parallel equivalence |
 
 These run automatically on every pull request via
@@ -296,9 +368,9 @@ macOS, Windows) and
 ### Canaries
 
 [`test_canary.py`](test/test_canary.py) is **not** part of the hermetic suite.
-It checks whether the three upstream feeds are still working, which is a
-question about third parties rather than about this code. Canaries are skipped
-unless you opt in:
+It checks whether the upstream feeds are still working, which is a question
+about third parties rather than about this code. Canaries are skipped unless you
+opt in:
 
 ```bash
 pytest multimet/test -m canary --run-canary
@@ -308,8 +380,9 @@ pytest multimet/test -m canary --run-canary
 | --- | --- |
 | NOAA PSL | The yearly NetCDF is published, exceeds the 1 MiB cache threshold, and still parses onto the MultiMet grid with live values |
 | WeatherBench 2 | The remote Zarr opens anonymously and a date inside its window yields real, physically plausible fields |
-| ECMWF open data | A forecast from the last 5 days is published under the expected prefix, and `OPEN_DATA_START_DATE` is still exactly the first available date |
+| ECMWF open data | A forecast from the last 5 days is published under the expected prefix, and `OPEN_DATA_START_DATE` is still_available |
 | ECMWF GRIB decoding | Real GRIB2 messages decode and regrid onto 721 × 1440, on **both** the `0p25` and `0p4-beta` grids (requires `eccodes`; skipped otherwise) |
+| NASA Earthdata CMR (IMERG) | `GPM_3IMERGHHE` resolves 48 half-hourly `.RT-H5` granules per UTC date and `GPM_3IMERGDE` resolves the daily `.nc4` granule |
 
 Every canary asserts on the *content* of what came back, never just that a call
 succeeded. That is deliberate: `_extract_single_date` degrades to an all-NaN
@@ -319,21 +392,21 @@ successful-looking build full of holes.
 > **Note**
 > Canaries run nightly via
 > [`.github/workflows/multimet-canary.yml`](../.github/workflows/multimet-canary.yml),
-> which has no `pull_request` trigger by design. An ECMWF outage is not a
+> which has no `pull_request` trigger by design. An upstream outage is not a
 > reason to block a merge.
 
 ---
 
 ## Adding a new product
 
-The two builders deliberately share a shape. To add a third:
+The three builders deliberately share a shape. To add another:
 
 1. Write a source class (or function) exposing
-   `extract_date(date, ...) -> dict[str, np.ndarray] | None`, returning `None`
-   when upstream has no data for that date.
+   `extract_date(date, ...) -> dict[str, np.ndarray] | np.ndarray | None`,
+   returning `None` when upstream has no data for that date.
 2. Define the archive's schema once, as a `build_batch_dataset`-style helper, and
    route every write path through it.
-3. Reuse the `write_batch_to_zarr` / resume / `--overwrite` structure so the new
-   builder is operationally identical to the existing two.
+3. Reuse the `write_batch_to_zarr` / resume / `--overwrite` / `--cleanup_cache`
+   structure so the new builder is operationally identical to the existing three.
 4. Add a hermetic test module with synthetic upstream data, marked `unit`, plus
    an end-to-end case marked `integration`.

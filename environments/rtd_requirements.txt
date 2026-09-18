@@ -12,6 +12,7 @@ absl-py
 # Required so that autodoc can import the multimet archive builders.
 fsspec
 pandas
+requests
 scipy
 tqdm
 xarray

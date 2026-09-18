@@ -25,12 +25,17 @@ downstream consumers can open one store and slice it by date.
      - NOAA CPC Global Unified gauge-based daily precipitation
      - 0.5°
      - 1979 → present
-     - ``gs://open-multimet/data/cpc/daily_surface.zarr``
+     - ``gs://open-multimet/gridded-data-archives/CPC/daily_surface.zarr``
    * - :mod:`multimet.build_hres_archive`
      - ECMWF IFS HRES daily surface forecast, lead days 1–10
      - 0.25°
      - 2016 → present
-     - ``gs://open-multimet/data/hres/daily_surface.zarr``
+     - ``gs://open-multimet/gridded-data-archives/HRES/daily_surface.zarr``
+   * - :mod:`multimet.build_imerg_archive`
+     - NASA GPM IMERG Early V07 daily precipitation
+     - 0.1°
+     - 2000 → present
+     - ``gs://open-multimet/gridded-data-archives/IMERG/daily_surface.zarr``
 
 .. note::
 
@@ -50,6 +55,7 @@ The builders are installed with the package and exposed as console scripts:
 
    build-cpc-archive --help
    build-hres-archive --help
+   build-imerg-archive --help
 
 Equivalently, run them as modules:
 
@@ -57,15 +63,22 @@ Equivalently, run them as modules:
 
    python -m multimet.build_cpc_archive --help
    python -m multimet.build_hres_archive --help
+   python -m multimet.build_imerg_archive --help
 
-Everything needed for the CPC builder and for the WeatherBench 2 portion of the
-HRES builder is in ``environments/environment_cpu.yml``. Decoding the **ECMWF
-Open Data** GRIB2 archive (HRES from 2023-07-13 onward) additionally requires
-ecCodes, which is imported lazily so the rest of the package works without it:
+Everything needed for the CPC, HRES, and IMERG builders is included in
+``environments/conda.yml`` and ``environments/environment_cpu.yml``. Decoding
+the **ECMWF Open Data** GRIB2 archive (HRES from 2023-07-13 onward) additionally
+requires ecCodes, which is imported lazily so the rest of the package works
+without it:
 
 .. code-block:: bash
 
    conda install -c conda-forge python-eccodes eccodes
+
+Fetching **NASA GPM IMERG** granules directly from NASA GES DISC requires NASA
+Earthdata Login credentials via ``~/.netrc`` or environment variables
+(``EARTHDATA_TOKEN``, or ``EARTHDATA_USERNAME`` and ``EARTHDATA_PASSWORD``),
+unless reading from a pre-populated ``--raw_dir`` mirror.
 
 ------------------------------
 CPC precipitation archive
@@ -114,18 +127,19 @@ Usage
 
 .. code-block:: bash
 
-   # Full archive from scratch.
-   build-cpc-archive --start_year 1979 --overwrite
+   # Full archive from scratch, removing temporary downloads afterward.
+   build-cpc-archive --start_year 1979 --overwrite --cleanup_cache
 
    # Incremental update: resumes from the last date already in the store.
-   build-cpc-archive
+   build-cpc-archive --cleanup_cache
 
    # Bounded backfill into a local store, single process.
    build-cpc-archive \
      --start_year 2020 --end_year 2021 \
      --start_date 2020-06-01 --end_date 2021-05-31 \
-     --target_zarr /tmp/cpc_test.zarr \
-     --num_workers 1
+     --target_zarr ./cpc_test.zarr \
+     --num_workers 1 \
+     --cleanup_cache
 
 ------------------------
 HRES forecast archive
@@ -134,8 +148,9 @@ HRES forecast archive
 Sources
 ^^^^^^^
 
-ECMWF IFS HRES is not available from any single archive over the full period,
-so the builder stitches three sources together and presents them as one store:
+ECMWF IFS HRES is not available from any single public archive over the full
+period, so the builder stitches public sources together and presents them as one
+store with a contiguous daily time axis:
 
 .. list-table::
    :header-rows: 1
@@ -144,13 +159,13 @@ so the builder stitches three sources together and presents them as one store:
      - Source
      - Format
    * - 2016-01-01 → 2023-01-10
-     - WeatherBench 2
+     - WeatherBench 2 (``gs://weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr``)
      - public Zarr
    * - 2023-01-11 → 2023-07-12
-     - Google Flood Forecasting archive
-     - NetCDF
+     - Initialized as ``NaN`` slices (can be backfilled in place with ``--in_place``)
+     - —
    * - 2023-07-13 → present
-     - ECMWF Open Data
+     - ECMWF Open Data (``gs://ecmwf-open-data``)
      - GRIB2
 
 Each date is routed to the source that owns it. If a date cannot be retrieved
@@ -164,7 +179,7 @@ Aggregation
 Every 00z initialization is reduced to 10 daily lead steps:
 
 - ``temperature_2m``, ``surface_pressure`` — 24-hour mean, computed from the
-  four 6-hourly steps that fall inside each lead day.
+   four 6-hourly steps that fall inside each lead day.
 - ``total_precipitation`` — 24-hour total. WeatherBench 2 already publishes a
   24h accumulation; ECMWF Open Data publishes a run-cumulative total, so it is
   differenced into per-day increments (and floored at zero, since a negative
@@ -209,22 +224,94 @@ Usage
 .. code-block:: bash
 
    # Full archive from scratch.
-   build-hres-archive --start_date 2016-01-01 --overwrite
+   build-hres-archive --start_date 2016-01-01 --overwrite --cleanup_cache
 
    # Incremental update: resumes from the last date already in the store.
-   build-hres-archive
+   build-hres-archive --cleanup_cache
 
    # Repair: recompute a date range and overwrite it in place, leaving the
    # surrounding time axis untouched.
    build-hres-archive \
-     --start_date 2023-02-01 --end_date 2023-02-28 \
-     --in_place
+     --start_date 2023-08-01 --end_date 2023-08-31 \
+     --in_place \
+     --cleanup_cache
+
+------------------------------
+IMERG precipitation archive
+------------------------------
+
+Sources
+^^^^^^^
+
+NASA GPM IMERG Early Run V07 (0.1°, ``1800 × 3600``) is built from the official
+NASA GES DISC Level 3 Daily product (``GPM_3IMERGDE.07``,
+``3B-DAY-E.MS.MRG.3IMERG.*.V07*.nc4``) or from pre-staged local NetCDF-4 /
+half-hourly HDF5 (``GPM_3IMERGHHE.07``, 48 ``.RT-H5`` granules/day) archives:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Source mode
+     - Flag
+     - Upstream format
+   * - NASA GES DISC (default)
+     - ``--source gesdisc``
+     - Daily NetCDF-4 (``3B-DAY-E.MS.MRG.3IMERG.{YYYYMMDD}-S000000-E235959.V07*.nc4``)
+   * - Local directory
+     - ``--source local --local_dir ...``
+     - Daily NetCDF-4 (``.nc4`` / ``.nc``) or 48 half-hourly HDF5 (``.RT-H5`` / ``.HDF5``) granules
+
+Transformations
+^^^^^^^^^^^^^^^
+
+#. **Axis transposition (** ``(lon, lat)`` → ``(latitude, longitude)`` **).**
+   Raw IMERG NetCDF-4 and HDF5 granules store ``precipitation`` with ``(lon, lat)``
+   ordering (``3600 × 1800``); the builder transposes every slice to
+   ``(latitude, longitude)`` (``1800 × 3600``) on an ascending
+   ``[-89.95, 89.95]`` × ``[-179.95, 179.95]`` grid.
+#. **Half-hourly integration (local HDF5 mode).** Half-hourly ``GPM_3IMERGHHE``
+   granules report precipitation rate in ``mm/hr``. The builder integrates all 48
+   30-minute slots (``sum(P_t * 0.5 hr)``) to obtain daily accumulation in
+   ``mm/day``.
+#. **Missing values become NaN.** NASA's negative fill values (``-9999.9``) and
+   any non-finite cells are masked to ``np.nan``.
+
+Output schema
+^^^^^^^^^^^^^
+
+.. code-block:: text
+
+   Dimensions:             (time, latitude, longitude)
+   Coordinates:
+     * time                datetime64[ns]     daily, midnight UTC
+     * latitude            float32   1800     -89.95 .. 89.95  (ascending)
+     * longitude           float32   3600     -179.95 .. 179.95
+   Data variables:
+       imerg_precipitation float32   (time, latitude, longitude)   mm/day
+   Chunking:               (1, 1800, 3600)
+
+Usage
+^^^^^
+
+.. code-block:: bash
+
+   # Full archive from scratch, removing downloaded granules after each date.
+   build-imerg-archive --start_date 2000-06-01 --overwrite --cleanup_cache
+
+   # Incremental update: resumes from the last date already in the store.
+   build-imerg-archive --cleanup_cache
+
+   # Repair a date window in place without changing the time axis length.
+   build-imerg-archive \
+     --start_date 2024-06-01 --end_date 2024-06-15 \
+     --in_place \
+     --cleanup_cache
 
 ----------------------
 Operational behaviour
 ----------------------
 
-Both builders share the same operational model.
+All three builders share the same operational model.
 
 Resume by default
 ^^^^^^^^^^^^^^^^^
@@ -250,7 +337,7 @@ Write modes
      - ``--overwrite``
      - Delete the store and rebuild from scratch.
    * - In place
-     - ``--in_place`` (HRES)
+     - ``--in_place`` (HRES, IMERG)
      - Rewrite dates that already exist, without changing the length of the
        time axis.
 
@@ -258,19 +345,26 @@ Write modes
 you have already ingested. It fails loudly if a requested date is not already in
 the store, so it can never silently corrupt the time index.
 
+Cache cleanup
+^^^^^^^^^^^^^
+
+Passing ``--cleanup_cache`` removes downloaded temporary files as each date/year
+completes and guarantees removal of the entire ``--cache_dir`` / ``--local_cache``
+directory in a ``try ... finally`` block when the run exits.
+
 Parallelism
 ^^^^^^^^^^^
 
 ``--num_workers`` controls a process pool. CPC parallelizes across years; HRES
-parallelizes across forecast dates. Workers only extract and transform — all
+and IMERG parallelize across dates. Workers only extract and transform — all
 Zarr writes happen serially in the parent process, so no locking is required.
 Set ``--num_workers 1`` for deterministic, easily debuggable runs.
 
 Batching and crash safety
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Extracted dates are accumulated into batches (``--batch_size`` for HRES, one
-year at a time for CPC) and written together. Writes are retried with
+Extracted dates are accumulated into batches (``--batch_size`` for HRES and
+IMERG, one year at a time for CPC) and written together. Writes are retried with
 exponential backoff. If a run dies mid-build, the next run resumes from the last
 successfully committed batch.
 
@@ -288,7 +382,8 @@ Testing
 -------
 
 The test suite is fully hermetic — it fabricates synthetic upstream data on the
-local filesystem and never contacts NOAA PSL, WeatherBench 2, ECMWF, or GCS.
+local filesystem and never contacts NOAA PSL, WeatherBench 2, ECMWF, NASA GES
+DISC, or GCS.
 
 .. code-block:: bash
 

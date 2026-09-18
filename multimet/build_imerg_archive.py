@@ -78,6 +78,9 @@ from multimet.storage import NON_RETRYABLE_ERRORS, resolve_zarr_target
 DEFAULT_PROJECT = "global-ungauged-experiments"
 DEFAULT_TARGET_ZARR = "open-multimet/gridded-data-archives/IMERG/daily_surface.zarr"
 DEFAULT_GESDISC_URL = "https://gpm1.gesdisc.eosdis.nasa.gov/data/GPM_L3/GPM_3IMERGDE.07"
+DEFAULT_CMR_GRANULES_URL = "https://cmr.earthdata.nasa.gov/search/granules.json"
+IMERG_HHR_SHORT_NAME = "GPM_3IMERGHHE"
+IMERG_DAILY_SHORT_NAME = "GPM_3IMERGDE"
 DEFAULT_START_DATE = "2000-06-01"
 DEFAULT_CACHE_DIR = os.path.join(tempfile.gettempdir(), "imerg_cache")
 
@@ -88,6 +91,42 @@ IMERG_LONS = np.linspace(-179.95, 179.95, LON_COUNT, dtype=np.float32)
 LATS = IMERG_LATS
 LONS = IMERG_LONS
 IMERG_VARIABLE = "imerg_precipitation"
+
+
+def query_cmr_granules(
+    short_name: str,
+    date: pd.Timestamp,
+    version: str = "07",
+    cmr_url: str = DEFAULT_CMR_GRANULES_URL,
+    timeout: int = 30,
+) -> List[str]:
+  """Queries NASA's Common Metadata Repository (CMR) for IMERG granule URLs on ``date``."""
+  dt = pd.Timestamp(date)
+  start_iso = dt.strftime("%Y-%m-%dT00:00:00Z")
+  end_iso = dt.strftime("%Y-%m-%dT23:59:59Z")
+  params = {
+      "short_name": short_name,
+      "version": version,
+      "temporal": f"{start_iso},{end_iso}",
+      "page_size": 200,
+  }
+  resp = requests.get(cmr_url, params=params, timeout=timeout)
+  resp.raise_for_status()
+  entries = resp.json().get("feed", {}).get("entry", [])
+  urls: List[str] = []
+  for entry in entries:
+    for link in entry.get("links", []):
+      href = link.get("href", "")
+      rel = link.get("rel", "")
+      if (
+          href.startswith("https://")
+          and "data#" in rel
+          and not href.endswith((".xml", ".dmrpp", ".s3"))
+          and href.endswith((".RT-H5", ".HDF5", ".h5", ".nc4", ".nc"))
+      ):
+        urls.append(href)
+        break
+  return sorted(set(urls))
 
 IMERG_ATTRS = {
     "title": "Open-MultiMet NASA GPM IMERG Early V07 Daily Surface Archive",
