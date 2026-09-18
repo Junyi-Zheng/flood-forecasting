@@ -743,8 +743,14 @@ def main(argv: Sequence[str] | None = None) -> None:
       in_place=args.in_place,
       num_workers=args.num_workers,
   )
+  if argv is None:
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
   main(sys.argv[1:])
-
+  sys.stdout.flush()
+  sys.stderr.flush()
+  os._exit(0)

@@ -100,3 +100,44 @@ def resolve_zarr_target(target: str) -> tuple[str, bool]:
 def is_remote_target(target: str) -> bool:
   """Returns whether ``target`` refers to a remote (cloud) store."""
   return resolve_zarr_target(target)[1]
+
+
+def patch_gcsfs_session_shutdown() -> None:
+  """Silences the benign cross-loop aiohttp RuntimeError at interpreter exit.
+
+  When ``zarr`` v3 (which runs its own asyncio loop thread) and ``gcsfs``
+  (which runs ``fsspec.asyn.loop[0]``) are used in the same process, ``gcsfs``'s
+  ``weakref.finalize`` callback ``GCSFileSystem.close_session`` attempts to
+  schedule ``session.close()`` on ``fsspec.asyn.loop[0]`` during interpreter
+  shutdown. Because the ``aiohttp`` connector futures belong to ``zarr``'s loop,
+  ``asyncio`` raises ``RuntimeError: Task ... got Future ... attached to a
+  different loop`` and logs ``Task was destroyed but it is pending!``. Using
+  ``gcsfs``'s own synchronous shutdown fallback (``connector._close()``) avoids
+  cross-loop scheduling during interpreter teardown.
+  """
+  try:
+    import gcsfs.core  # type: ignore[import-untyped]
+  except ImportError:
+    return
+
+  orig_close = getattr(gcsfs.core.GCSFileSystem, 'close_session', None)
+  if orig_close is None or getattr(orig_close, '_multimet_patched', False):
+    return
+
+  def _safe_close_session(loop: object, session: object, asynchronous: bool = False) -> None:
+    del loop, asynchronous
+    try:
+      if getattr(session, 'closed', True):
+        return
+      connector = getattr(session, '_connector', None)
+      if connector is not None:
+        connector._close()
+    except Exception:  # noqa: BLE001 - best-effort cleanup during atexit.
+      pass
+
+  _safe_close_session._multimet_patched = True  # type: ignore[attr-defined]
+  gcsfs.core.GCSFileSystem.close_session = staticmethod(_safe_close_session)
+
+
+patch_gcsfs_session_shutdown()
+
