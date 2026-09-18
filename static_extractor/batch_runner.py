@@ -62,6 +62,7 @@ def setup_logging(verbose: bool = False) -> None:
         "pyogrio",
     ]:
       logging.getLogger(name).setLevel(logging.WARNING)
+  logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 
 SUPPORTED_EXTENSIONS = [".shp", ".geojson", ".gpkg", ".json", ".parquet", ".geoparquet"]

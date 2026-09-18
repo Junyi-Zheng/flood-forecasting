@@ -41,6 +41,32 @@ from static_extractor.config import (
 )
 
 logger = logging.getLogger(__name__)
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+
+
+def _patch_gcsfs_close_session() -> None:
+  """Prevents gcsfs weakref finalizer from raising RuntimeError when zarr v3 uses a separate event loop."""
+  try:
+    import gcsfs.core
+
+    orig_close = gcsfs.core.GCSFileSystem.close_session
+
+    if getattr(orig_close, "_is_safe_wrapped", False):
+      return
+
+    def _safe_close_session(loop, session, asynchronous=False):
+      try:
+        orig_close(loop, session, asynchronous=asynchronous)
+      except Exception:
+        pass
+
+    _safe_close_session._is_safe_wrapped = True
+    gcsfs.core.GCSFileSystem.close_session = staticmethod(_safe_close_session)
+  except Exception:
+    pass
+
+
+_patch_gcsfs_close_session()
 
 
 def calculate_fao_pm_pet(

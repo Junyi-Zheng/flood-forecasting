@@ -137,6 +137,7 @@ def main(args=None):
   if not parsed.verbose:
     for name in ["static_extractor", "urllib3", "google", "gcsfs", "fiona", "pyogrio"]:
       logging.getLogger(name).setLevel(logging.WARNING)
+  logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
   input_path = Path(parsed.input)
   if not input_path.exists():
