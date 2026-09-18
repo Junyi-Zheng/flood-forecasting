@@ -235,38 +235,56 @@ pytest test/test_static_extractor.py -v
 
 ---
 
-## 📊 Global Benchmarking Suite
+## 📊 Benchmarking
 
-The package includes an automated benchmarking suite (`static_extractor.benchmark`) that validates extracted attributes against published Caravan reference data across **490 diverse basins globally** (7 datasets × 5 size tiers: micro, small, medium, large, macro).
+The benchmark compares the attributes this package produces against published
+Caravan reference values for 490 basins, spread over 7 datasets and 5 catchment
+size tiers.
 
-### Running the Benchmark
+It is **not** part of the test suite. It downloads real data and takes minutes
+rather than seconds, so it is something you run deliberately when you want to
+check the numbers yourself rather than take them on trust.
+
+### What you need beforehand
+
+Nothing. The reference dataset lives at
+
+```
+gs://open-multimet/ancillary-data/benchmarks/benchmark_basins_500.parquet
+```
+
+and is downloaded the first time you run the benchmark, then cached under
+`static_extractor/data/`. The HydroATLAS store it compares against is fetched
+the same way. You need read access to those buckets and roughly 12 MB of disk
+for the reference file.
+
+### Running it
 
 ```bash
-# Run full global benchmark across 490 basins using 14 parallel workers
-python -m static_extractor.benchmark --workers 14 -o ./benchmark_results/
+# Everything: all 490 basins
+benchmark-static-extractor --workers 14 -o ./benchmark_results/
 
-# Run quick benchmark on 50 stratified basins
-python -m static_extractor.benchmark --samples 50 --workers 8 -o ./benchmark_results/
+# A quicker spot-check: 50 basins, stratified across datasets and size tiers
+benchmark-static-extractor --samples 50 --workers 8 -o ./benchmark_results/
 
-# Filter by specific dataset regions or size tiers
-python -m static_extractor.benchmark \
+# Narrowed to particular datasets or catchment sizes
+benchmark-static-extractor \
     --regions camels camelsaus lamah \
     --size-tiers 1_micro 5_macro \
     --workers 8 \
     -o ./benchmark_results/
 ```
 
-### Benchmark Metrics & Validation Results
-Evaluating all 490 basins across 210 attributes (196 HydroATLAS + 14 Caravan ERA5 climate metrics) executes in **~11.5 seconds** (0.024s / basin on 14 cores):
+### Reading the output
 
-- **Continuous Attributes Median Pearson $r$**: **`0.99982`**
-- **Continuous Attributes Mean Pearson $r$**: **`0.9631`**
-- **Attributes with $r \ge 0.99$**: **`88.5%`** (177 of 200 continuous attributes)
-- **Categorical Majority Classification Accuracy**: **`99.57%`** (10 discrete classes)
-- **Median Basin Drainage Area Discrepancy**: **`0.23%`**
+Three files land in the output directory:
 
-Generated benchmark outputs in `--output-dir`:
-1. `benchmark_report.md`: Markdown report with executive summary, domain breakdown tables, regional tables, size tier tables, and top/bottom attribute rankings.
-2. `benchmark_attribute_metrics.csv`: Detailed row per attribute with domain, count, $r$, $\rho$, $R^2$, MAE, RMSE, and median relative error %.
-3. `benchmark_basin_metrics.csv`: Detailed row per basin with dataset, size tier, calculated area, area bias %, median attribute error %, and execution time.
+- `benchmark_report.md` — a readable summary; start here.
+- `benchmark_attribute_metrics.csv` — one row per attribute, showing how closely
+  each one reproduces the reference values.
+- `benchmark_basin_metrics.csv` — one row per basin, including the attribute
+  that matched worst for that basin.
+
+The two CSVs are there so you can find *which* attributes or basins disagree and
+by how much, rather than relying on a single headline number.
 

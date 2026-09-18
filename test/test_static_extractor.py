@@ -314,36 +314,6 @@ def test_benchmark_attribute_categorization():
   assert get_attribute_category("wet_cl_smj") == "Hydrology"
 
 
-def test_benchmark_run_mini(tmp_path):
-  """Tests executing a mini benchmark run with 4 basins."""
-  from static_extractor.benchmark import run_benchmark, DEFAULT_BENCHMARK_PATH
-  from static_extractor.config import get_default_gdb_path
-
-  if not DEFAULT_BENCHMARK_PATH.exists() or not get_default_gdb_path().exists():
-    pytest.skip("BasinATLAS GDB or benchmark dataset not cached locally (skipping live GCS download in CI).")
-
-  attr_df, basin_df = run_benchmark(
-      samples=4,
-      workers=2,
-      output_dir=str(tmp_path),
-  )
-
-  assert len(basin_df) == 4
-  assert len(attr_df) == 210
-  assert "max_abs_error" in attr_df.columns
-  assert "max_rel_error_pct" in attr_df.columns
-  assert "max_attr_rel_err_pct" in basin_df.columns
-  assert "worst_attribute" in basin_df.columns
-  assert (tmp_path / "benchmark_report.md").exists()
-  assert (tmp_path / "benchmark_attribute_metrics.csv").exists()
-  assert (tmp_path / "benchmark_basin_metrics.csv").exists()
-  report_text = (tmp_path / "benchmark_report.md").read_text()
-  assert "Executive Summary" in report_text
-  assert "Total Basins Evaluated" in report_text
-  assert "Maximum Basin Drainage Area Discrepancy" in report_text
-  assert "Maximum Attribute Relative Error" in report_text
-
-
 def test_batch_runner_clean_cache_flag(tmp_path):
   """Verifies that --clean-cache removes cache_root after batch execution."""
   from static_extractor.batch_runner import parse_args, main
@@ -636,6 +606,3 @@ def test_batch_runner_preserve_caravan_dirs(tmp_path, monkeypatch):
       dest == "gs://open-multimet/caravan-new/google-internal/attributes/camelsfr/"
       for _, dest in uploaded_uris
   )
-
-
-

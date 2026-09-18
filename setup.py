@@ -38,9 +38,6 @@ setup(
         'googlehydrology.evaluation',
         'static_extractor',
     ],
-    package_data={
-        'static_extractor': ['data/*.parquet'],
-    },
     url='https://googlehydrology.readthedocs.io',
     project_urls={
         'Documentation': 'https://googlehydrology.readthedocs.io',
