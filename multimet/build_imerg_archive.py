@@ -931,6 +931,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
   )
   parser.add_argument(
       "--cache_dir",
+      "--local_cache",
+      dest="cache_dir",
       type=str,
       default=DEFAULT_CACHE_DIR,
       help="Local directory used to stage downloaded NASA GES DISC NetCDF files.",
