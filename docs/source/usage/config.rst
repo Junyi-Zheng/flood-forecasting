@@ -94,20 +94,15 @@ Training settings
 -  ``epochs``: Number of training epochs.
 -  ``num_workers``: Number of (parallel) threads used in the data loader.
 -  ``max_updates_per_epoch``: Optional limit on weight updates per epoch. Use `< 1` to go through all data in every epoch.
--  ``clip_gradient_norm``: Max norm for gradient clipping. Leave empty for not clipping.
-   When enabled, each training epoch logs how many finite pre-clip gradient norms
-   exceed this threshold, the percentage, and the median, 90th and 99th percentiles.
-   Norms are measured after undoing mixed-precision gradient scaling and before
-   clipping, on every clipping call regardless of the loss logging interval.
-   Steps skipped because of NaN loss are not checked. Non-finite norms are counted
-   separately and excluded from the percentage and percentiles; checked steps
-   are clipping attempts, not necessarily successful optimizer updates.
-   If no finite norms are available, the log says so instead of reporting 0%.
-   With TensorBoard enabled, epoch statistics are also written under
-   ``train/gradient_clipping/`` (``threshold``, ``checked_steps``, ``finite_steps``,
-   ``nonfinite_steps``, ``clipped_steps``, ``clipped_fraction``, ``norm_median``,
-   ``norm_p90`` and ``norm_p99``). The fraction ranges from 0 to 1; it and the
-   percentiles are omitted for epochs without finite norms.
+-  ``clip_gradient_norm``: Positive float specifying the max norm for gradient
+   clipping. Leave empty to disable clipping. When enabled, each epoch logs the
+   count and percentage of finite pre-clip (unscaled) gradient norms exceeding
+   this threshold, plus the median, 90th, and 99th percentiles (excluding
+   NaN-loss steps and counting non-finite AMP norms separately). With
+   TensorBoard enabled, epoch summaries are also written under
+   ``train/gradient_clipping/{threshold,checked_steps,finite_steps,nonfinite_steps,clipped_steps,clipped_fraction,norm_median,norm_p90,norm_p99}``
+   (``clipped_fraction`` in ``[0, 1]`` and percentiles are omitted when
+   ``finite_steps == 0``).
 -  ``target_noise_std``: Standard deviation of Gaussian noise added to labels during training. Set to zero or
    leave empty to *not* add noise.
 -  ``allow_subsequent_nan_losses``: Number of allowed consecutive NaN losses before stopping.

@@ -192,7 +192,9 @@ class Logger(object):
         }
         if finite_steps:
             fraction = clipped_steps / finite_steps
-            median, p90, p99 = np.percentile(finite_norms, [50, 90, 99])
+            median, p90, p99 = map(
+                float, np.percentile(finite_norms, [50, 90, 99])
+            )
             stats.update(
                 clipped_fraction=fraction,
                 norm_median=median,
